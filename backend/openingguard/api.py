@@ -10,7 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import __version__
 from .agent import run_agent_assessment
 from .core import build_assessment, list_scenarios, load_scenario
-from .schemas import SimulationRequest
+from .mock_order import SETTINGS as MOCK_ORDER_SETTINGS, process_mock_order
+from .schemas import MockOrderRequest, SimulationRequest
 
 
 DEFAULT_LOCAL_ORIGINS = ",".join(
@@ -52,6 +53,7 @@ def health() -> dict[str, Any]:
         "prototype": True,
         "openai_api_key_present": bool(os.getenv("OPENAI_API_KEY")),
         "scenarios": list_scenarios(),
+        "mock_order_concurrency": MOCK_ORDER_SETTINGS.concurrency,
     }
 
 
@@ -65,6 +67,13 @@ def simulate(body: SimulationRequest) -> dict[str, Any]:
         return build_assessment(body.scenario, body.runs, body.seed)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/mock-orders")
+async def mock_order(body: MockOrderRequest) -> dict[str, Any]:
+    """Measure a local mock pipeline; never sends an order to a real market."""
+    result = await process_mock_order(body.order_id)
+    return {"order_id": str(body.order_id), **result}
 
 
 def main() -> None:

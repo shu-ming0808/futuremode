@@ -291,6 +291,24 @@ uv run jupyter lab notebooks/statistical_analysis.ipynb
 
 Notebook 已嵌入執行結果，包含合成流量、peak RPS 分布、Monte Carlo、Wilson interval、延遲、成本、參數掃描及下游硬上限圖。
 
+### 8. 執行本機 Mock 下單容量校準
+
+```powershell
+uv run openingguard-calibrate
+```
+
+此指令會自動在 `127.0.0.1:8010` 暫時啟動 FastAPI，測試結束後關閉，不占用正式串接的 8000 port。校準器會測試不同 offered concurrency 與目標 RPS，結果寫入 `calibration_results/latest.json`。
+
+若要降低短時間測試的隨機波動，可延長每組量測時間：
+
+```powershell
+uv run openingguard-calibrate --duration 30 --warmup 5
+```
+
+Mock pipeline 只包含三個合成階段：request validation、Database delay、gateway delay。預設平均延遲分別為 10、90、100 ms，並使用 deterministic lognormal 變異；它們不是實際 Database 或交易閘道。輸出包含平均與 P95 端到端延遲、內部服務時間、Queue wait、最大穩定目標 RPS，以及 concurrency 增加後的效率。結果只能稱為「本機 mock 校準」。
+
+目前保存的 3 秒短校準結果，在 server concurrency 20 時量得平均內部工作約 199 ms、P95 server time 約 312 ms、closed-loop throughput 約 80.8 RPS、效率約 0.804；rate sweep 的最高安全目標為 80 RPS。安全條件同時要求 P95 低於 2 秒、錯誤率低於 0.1%，以及「完成吞吐量／目標 RPS」至少 0.90。短測只用來確認流程；正式引用前應改跑 30 秒以上並重複多次。
+
 ## API
 
 ### `GET /api/health`
@@ -338,6 +356,20 @@ Notebook 已嵌入執行結果，包含合成流量、peak RPS 分布、Monte Ca
 
 目前 API 刻意不接受呼叫端自行傳入 RPS、倍率、P50/P90/P99、market features 或 confidence。呼叫端只能選 `scenario_id`；Agent 只能選擇既有 `risk_id`，不能創造情境數值。若未來開放自訂參數，必須使用另一個受嚴格驗證的管理流程，不交由 LLM 直接填值。
 
+### `POST /api/mock-orders`
+
+本機校準專用的假下單端點。它驗證 UUID、帳號、商品、買賣方向及數量，再模擬 Database 與交易閘道延遲，最後只回傳 `status: accepted` 與各階段時間；不會送出真實委託。
+
+```json
+{
+  "order_id": "00000000-0000-0000-0000-000000000001",
+  "account_id": "DEMO-ACCOUNT",
+  "symbol": "2330",
+  "side": "buy",
+  "quantity": 1
+}
+```
+
 ## 統計 Notebook 流程
 
 `notebooks/statistical_analysis.ipynb` 每個 code cell 前都有 Markdown 說明，流程如下：
@@ -369,6 +401,8 @@ backend/
 │
 ├── notebooks/
 │   └── statistical_analysis.ipynb    # 統計分析、圖表與敏感度掃描
+├── calibration_results/
+│   └── latest.json                    # 最近一次本機 mock 校準結果
 │
 └── openingguard/
     ├── __init__.py                   # 套件版本
@@ -376,6 +410,8 @@ backend/
     ├── schemas.py                    # Pydantic request schema
     ├── cli.py                        # CLI 與互動式 Demo
     ├── agent.py                      # Responses API tool calling 與評測
+    ├── mock_order.py                 # 三階段 mock 下單服務
+    ├── calibrate.py                  # concurrency 與 RPS 校準器
     ├── core.py                       # 流量、Queue、策略與容量搜尋核心
     └── data/
         ├── risk_catalog.json         # 10 種固定風險與倍率
@@ -393,7 +429,7 @@ backend/
 - normal 與 high-pressure 可產生 candidate recommendation。
 - downstream-bottleneck 會拒絕 worker-only 方案並回傳警告。
 - 沒有 API key 時，Agent 結果正確標示為非 LLM。
-- Notebook 12 個 code cells 已完整執行，內嵌 7 張圖，沒有 cell error。
+- Notebook 13 個 code cells 已完整執行，內嵌 8 張圖，沒有 cell error。
 
 ## 未完成與已知限制
 
@@ -413,6 +449,11 @@ backend/
 ## 參考資料
 
 - [OpenAI Function Calling](https://developers.openai.com/api/docs/guides/function-calling)：Agent tool schema 與 tool-call 流程。
+- [TWSE OpenAPI](https://openapi.twse.com.tw/)：臺灣市場五秒委託成交統計與公開行情入口。
+- [Nasdaq TotalView-ITCH sample data](https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/)：逐筆市場事件與群聚模型的公開樣本；不代表券商 HTTP 流量。
+- [TPC-E](https://www.tpc.org/tpc_documents_current_versions/pdf/tpc-e_v1.14.0.pdf)：券商 OLTP、交易請求、Market Exchange Emulator 與 sustainable throughput 的實驗設計。
+- [Little (1961), A Proof for the Queuing Formula](https://pubsonline.informs.org/doi/abs/10.1287/opre.9.3.383)：並行量、吞吐率與平均停留時間的關係。
+- [Grafana k6 constant-arrival-rate](https://grafana.com/docs/k6/latest/using-k6/scenarios/executors/constant-arrival-rate/)：固定到達率的 open-model 壓測方法。
 - [Kubernetes Horizontal Pod Autoscaling](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/)：反應式擴容與控制迴路背景。
 - [AWS Builders' Library: Timeouts, retries and backoff with jitter](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/)：逾時、重試放大、backoff 與 jitter。
 - [AWS Builders' Library: Avoiding insurmountable queue backlogs](https://aws.amazon.com/builders-library/avoiding-insurmountable-queue-backlogs/)：Queue backlog 與系統恢復風險。
