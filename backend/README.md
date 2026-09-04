@@ -178,7 +178,7 @@ $$
 | `high_pressure` | 2 秒 | 0.1% | 5% | 95% | backoff + jitter | 2 | base 0.25 秒，max 1 秒 |
 | `downstream_bottleneck` | 2 秒 | 0.1% | 5% | 95% | immediate | 2 | 0.1 秒 |
 
-三組情境都使用 candidate workers `[6, 8, 10, 12, 14, 16]`。數值是可替換的 Demo 假設，應在取得壓測或營運資料後重新校準。
+三組情境都使用 candidate workers `[6, 8, 10, 12, 14, 16]`。目前情境版本為 `2026-09-04-v1`，設定檔由 Git 管理；每次結果也回傳 `scenario_version` 與 `simulator_version`，使報告能追溯使用哪一版參數。數值是可替換的 Demo 假設，應在取得壓測或營運資料後建立新版本，不直接覆寫舊結果的解讀依據。
 
 ## 容量方案搜尋
 
@@ -198,7 +198,7 @@ gateway peak utilization < 95%
 
 ## OpenAI Agent 決策流程
 
-1. API 接收結構化情境與自然語言營運備註。
+1. 後端依 `scenario_id` 載入版本化的固定結構化參數，呼叫端只提供情境 ID 與自然語言營運備註。
 2. 模型只能從 `risk_catalog.json` 選擇最多三個既有 `risk_id`。
 3. `matched_input_text` 必須逐字出現在營運備註中。
 4. 模型必須呼叫 `run_capacity_assessment` function tool。
@@ -322,6 +322,8 @@ Notebook 已嵌入執行結果，包含合成流量、peak RPS 分布、Monte Ca
 | 欄位 | 說明 |
 |---|---|
 | `run_id` | 本次執行 UUID |
+| `scenario_version` | 本次使用的固定情境參數版本 |
+| `simulator_version` | 本次使用的模擬器版本 |
 | `synthetic_assumption` | 固定為 true，提醒數據是合成假設 |
 | `risk_matches` | Agent 選出的風險與可信目錄來源 |
 | `scenarios` | 三種策略的效能、風險與成本 |
@@ -331,7 +333,7 @@ Notebook 已嵌入執行結果，包含合成流量、peak RPS 分布、Monte Ca
 | `approval_status` | 固定為 `pending_human_approval` |
 | `agent` | Agent 模式、模型、tool call 與是否為真正 LLM 結果 |
 
-目前 API 尚未直接接收 P50/P90/P99、market features 或 confidence；前端應先使用情境 ID 串接，待輸入契約定稿後再擴充 schema。
+目前 API 刻意不接受呼叫端自行傳入 RPS、倍率、P50/P90/P99、market features 或 confidence。呼叫端只能選 `scenario_id`；Agent 只能選擇既有 `risk_id`，不能創造情境數值。若未來開放自訂參數，必須使用另一個受嚴格驗證的管理流程，不交由 LLM 直接填值。
 
 ## 統計 Notebook 流程
 
@@ -392,7 +394,7 @@ backend/
 
 ## 未完成與已知限制
 
-- [ ] 將 API 擴充為可直接接收市場特徵、流量分位數與 confidence，並驗證 P50 ≤ P90 ≤ P99。
+- [ ] 若未來需要自訂情境，另建受權限與 schema 保護的管理流程；現行公開模擬 API 維持只接受版本化 `scenario_id`。
 - [ ] 將容量搜尋擴充到 `maxReplicas`、concurrency、Queue threshold、預熱時間與多目標成本。
 - [ ] 把單機 RPS 拆成 concurrency 與服務時間分布，評估逐筆離散事件或 SimPy 實作。
 - [ ] 將 Monte Carlo 上限由 500 擴充至離線 1,000+ runs，並加入平行運算與執行時間報告。
@@ -403,7 +405,7 @@ backend/
 - [ ] 實作持久化 idempotency key、委託狀態機與「已接受但未成交」語意；目前不接真實 DB。
 - [ ] 串接公開新聞與市場行情，保留資料時間戳、來源與失敗降級機制。
 - [ ] 加入認證授權、rate limiting、structured logging、metrics、trace、Docker 與部署設定。
-- [ ] 與前端共同定稿 API contract；目前舊 `後端.md` 的登入模型及範例格式已和下單版實作不一致。
+- [ ] 與 API 呼叫端定稿 contract；目前舊 `後端.md` 的登入模型及範例格式已和下單版實作不一致。
 
 ## 參考資料
 

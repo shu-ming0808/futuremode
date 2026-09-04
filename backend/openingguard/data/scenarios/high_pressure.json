@@ -1,5 +1,6 @@
 {
   "scenario_id": "high_pressure",
+  "scenario_version": "2026-09-04-v1",
   "label": "市場壓力＋版本更新",
   "duration_seconds": 300,
   "operation_note": "今晚部署新版下單服務，夜盤量能偏高，明早開盤可能大量送單",

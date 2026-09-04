@@ -58,7 +58,15 @@ def load_risk_catalog() -> list[dict[str, Any]]:
 
 
 def validate_scenario(s: dict[str, Any]) -> None:
-    required = {"scenario_id", "duration_seconds", "traffic", "capacity", "slo", "retry"}
+    required = {
+        "scenario_id",
+        "scenario_version",
+        "duration_seconds",
+        "traffic",
+        "capacity",
+        "slo",
+        "retry",
+    }
     missing = sorted(required - s.keys())
     if missing:
         raise ValueError(f"缺少必要欄位：{', '.join(missing)}")
@@ -457,6 +465,7 @@ def build_assessment(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "simulator_version": SIMULATOR_VERSION,
         "scenario": scenario_id,
+        "scenario_version": scenario["scenario_version"],
         "label": scenario.get("label", scenario_id),
         "synthetic_assumption": True,
         "random_seed": seed,

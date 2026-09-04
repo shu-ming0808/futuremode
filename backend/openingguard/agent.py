@@ -108,6 +108,7 @@ def _llm_select(operation_note: str, scenario_id: str) -> tuple[dict[str, Any], 
     payload = {
         "structured_scenario": {
             "scenario_id": scenario_id,
+            "scenario_version": scenario["scenario_version"],
             "traffic": scenario["traffic"],
             "capacity": scenario["capacity"],
             "slo": scenario["slo"],
@@ -172,6 +173,7 @@ def run_agent_assessment(
         call = next(item for item in first_response.output if item.type == "function_call")
         compact_tool_output = {
             "scenario": assessment["scenario"],
+            "scenario_version": assessment["scenario_version"],
             "scenarios": assessment["scenarios"],
             "recommended": assessment["recommended"],
             "warning": assessment["warning"],

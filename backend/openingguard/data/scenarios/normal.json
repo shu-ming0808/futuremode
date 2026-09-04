@@ -1,5 +1,6 @@
 {
   "scenario_id": "normal",
+  "scenario_version": "2026-09-04-v1",
   "label": "正常開盤",
   "duration_seconds": 300,
   "operation_note": "例行營運，今晚沒有部署或已知下游異常",

@@ -1,5 +1,6 @@
 {
   "scenario_id": "downstream_bottleneck",
+  "scenario_version": "2026-09-04-v1",
   "label": "市場壓力＋下游容量下降＋立即重試",
   "duration_seconds": 300,
   "operation_note": "交易閘道回應變慢且資料庫連線池接近滿載，客戶端目前會立即重試",
