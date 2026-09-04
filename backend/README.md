@@ -2,7 +2,7 @@
 
 ## 專案目的
 
-OpeningGuard AI 是券商內部使用的開盤容量決策 Demo。系統以合成下單請求建立 Monte Carlo 排隊模擬，比較固定容量、反應式 autoscaling 與預測式預熱，並由 LLM Agent 從固定風險目錄選擇相關風險後呼叫確定性的容量評估工具。
+OpeningGuard AI 是券商內部使用的開盤容量決策 Demo。系統以合成下單請求建立 Monte Carlo 排隊模擬，比較固定容量、反應式 autoscaling 與預測式預熱，並由三個 OpenAI judge 從固定風險目錄選擇 `risk_id` 與容量影響 `severity`，再交由確定性的容量評估工具計算。
 
 本專案回答兩個問題：
 
@@ -16,7 +16,7 @@ OpeningGuard AI 是券商內部使用的開盤容量決策 Demo。系統以合�
 ```mermaid
 flowchart TD
     A["結構化情境參數"] --> D["容量評估工具"]
-    B["自然語言營運備註"] --> C["OpenAI Agent<br/>選擇既有 risk_id"]
+    B["自然語言營運備註"] --> C["三個 OpenAI Judge<br/>選擇 risk_id + severity"]
     C --> D
     E["固定風險目錄<br/>與預先定義倍率"] --> C
     E --> D
@@ -45,7 +45,7 @@ flowchart TD
 | 套件管理 | `uv`、`pyproject.toml`、`uv.lock` | 建立可重現環境與鎖定依賴 |
 | API | FastAPI | 提供 health check 與容量模擬端點 |
 | 數值計算 | NumPy | 合成流量與 Monte Carlo 統計 |
-| Agent | OpenAI Responses API function calling | 從固定目錄選風險並呼叫容量工具 |
+| Agent | OpenAI Responses API function calling | 三個 judge 從固定目錄選擇風險與容量影響程度 |
 | Schema | Pydantic | 驗證 API 輸入 |
 | 統計分析 | pandas、Matplotlib、Seaborn、JupyterLab | 產生表格、信賴區間與敏感度圖 |
 | 儲存 | JSON 與記憶體 | MVP 情境、風險目錄及執行結果；目前無正式 Database |
@@ -91,6 +91,8 @@ N_t \sim \operatorname{Poisson}(\lambda_t\Delta t)
 $$
 
 因此目前可稱為「帶有日級與短期強度擾動的 mixed-Poisson 合成模型」，不能宣稱真實券商下單流量已被證明符合此分布。Hawkes process 僅列為取得逐筆事件時間後的未來配適候選。
+
+開盤 Monte Carlo 不做 burn-in。09:00 的 transient spike 正是研究目標，丟棄前段資料會低估最重要的開盤風險。
 
 ### 3. 每個時間步的有效容量
 
@@ -140,7 +142,7 @@ $$
 | 指標 | 定義 |
 |---|---|
 | `congestion_probability` | Monte Carlo runs 中被判為壅塞的比例 |
-| `congestion_probability_ci95` | 二項比例的 95% Wilson interval |
+| `congestion_probability_ci95` | 二項比例的 95% Wilson interval；正式判定使用其上界 |
 | `p95_latency_ms` | 各 run 原始請求延遲 P95 的中位數 |
 | `timeout_rate` | 逾時 attempts／全部 attempts |
 | `accepted_within_slo_rate` | 2 秒內接受的原始委託／原始委託 |
@@ -150,7 +152,7 @@ $$
 | `retry_amplification_factor` | 全部 attempts／原始請求 |
 | `total_worker_minutes` | 模擬期間 worker 數對時間的積分，作為相對成本 |
 
-`relevance_score` 只表示 Agent 對風險的排序分數，不是風險發生機率；`congestion_probability` 才是模擬產生的機率估計。
+`severity` 只代表事件對系統容量的影響程度，不是事件發生機率。三位 judge 的票數只代表判斷共識，也不能視為三個獨立統計樣本；`congestion_probability` 才是模擬產生的壅塞機率估計。
 
 ## 三個固定 Demo 情境
 
@@ -187,40 +189,42 @@ $$
 ```text
 P95 latency < 2 seconds
 timeout rate < 0.1%
-congestion probability < 5%
+Wilson 95% CI upper bound of congestion probability < 5%
 database peak utilization < 95%
 gateway peak utilization < 95%
 ```
 
-可行方案依 worker-minutes、壅塞機率、P95 與 worker 數排序，選出最低成本方案。如果所有方案都失敗，回傳 DB／交易閘道、限流、降載或人工處理警告，不硬選不安全方案。
+可行方案依 worker-minutes、壅塞機率、P95 與 worker 數排序，選出最低成本方案。即使壅塞率點估計低於 5%，只要 Wilson 95% 信賴區間上界仍達到 5%，就不算正式通過。如果所有方案都失敗，回傳 DB／交易閘道、限流、降載或人工處理警告，不硬選不安全方案。
 
 目前 `prewarm_at` 固定回傳 `08:50`；尚未把預熱時間、Queue threshold、concurrency 與 `maxReplicas` 放入聯合搜尋。
 
 ## OpenAI Agent 決策流程
 
 1. 後端依 `scenario_id` 載入版本化的固定結構化參數，呼叫端只提供情境 ID 與自然語言營運備註。
-2. 模型只能從 `risk_catalog.json` 選擇最多三個既有 `risk_id`。
-3. `matched_input_text` 必須逐字出現在營運備註中。
-4. 模型必須呼叫 `run_capacity_assessment` function tool。
-5. Python 從可信風險目錄補上來源 URL，不接受模型自行產生來源。
-6. Python 套用目錄中事先定義的 medium 倍率並執行確定性模擬。
-7. 模型解釋工具結果，但不可提出工具未計算的 worker 數。
-8. 最終狀態維持 `pending_human_approval`。
+2. 三個 judge 分別採市場事件、系統容量與風險稽核視角；預設可共用同一個 OpenAI model，也可透過 `OPENAI_JUDGE_MODELS` 指定三個可用的 OpenAI model。
+3. 每個 judge 只能從 `risk_catalog.json` 選擇最多三個既有 `risk_id`。
+4. 嚴重度不是任意分數，而是兩個有序的 0/1 判斷：`is_at_least_medium` 與 `is_high`；`is_high=1` 時前者必須為 1。
+5. `matched_input_text` 必須逐字出現在營運備註中。
+6. 每個 judge 必須呼叫 strict function tool `submit_risk_judgment`；模型不得輸出倍率、RPS 或 worker 數。
+7. Python 彙整三票並從可信目錄補上來源 URL，再依 `risk_id + severity` 套用固定倍率。
+8. 多數票決定 `low`、`medium` 或 `high`。沒有多數共識時保留 `severity=uncertain`，但以固定的 `high` 參數產生最壞情境預覽。
+9. `uncertain` 必須回傳 `requires_human_review=true`、`auto_approved=false`，不得自動部署或把預覽冒充正式判斷。
+10. Python 執行模擬並以確定性文字整理結果；最終容量決策一律等待人工核准。
 
-### Medium 風險倍率
+### 風險嚴重度與固定倍率
 
-| risk_id | 套用效果 |
-|---|---|
-| `market_volatility_order_spike` | arrival × 1.5 |
-| `release_product_file_download` | worker capacity × 0.9 |
-| `database_connection_saturation` | DB capacity × 0.7 |
-| `gateway_rate_limit` | gateway capacity × 0.7 |
-| `retry_storm` | max retries = 2 |
-| `worker_capacity_saturation` | worker capacity × 0.75 |
-| `cold_start_autoscaling_delay` | warmup time × 1.5 |
-| `cache_cold_start` | DB capacity × 0.8 |
-| `network_dependency_failure` | 目前只提示人工檢查，不套數值 |
-| `unknown_unquantified_risk` | 不強行量化，交由人工確認 |
+`severity` 定義的是「事件發生後對系統容量的影響」，不是事件發生機率：
+
+| severity | 容量意義 | 模擬行為 |
+|---|---|---|
+| `low` | 影響有限 | 使用目錄中的 low 參數 |
+| `medium` | 可能明顯增加 Queue 或資源使用 | 使用 medium 參數 |
+| `high` | 可能造成逾時、下游飽和或違反 SLO | 使用 high 參數 |
+| `uncertain` | judge 無法形成多數共識 | Agent 結果保持 uncertain；模擬暫用 high，要求人工覆核 |
+
+`risk_catalog.json` 已為每個 `risk_id` 保存 low／medium／high 的固定 `simulation_assumptions`。倍率由 Git 版本化 JSON 決定，Agent 不能自行創造或修改數值。
+
+同一模型的三個 judge 具有相關性，因此不能把 3 票當作 3 個獨立隨機樣本。15 筆人工標註案例涵蓋 low／medium／high、multi-risk 與 no-match，除 Top-1、Top-3 與 no-match false-positive 外，也輸出 severity confusion matrix、accuracy、macro-F1、coverage 與 covered cases 的 quadratic weighted kappa。
 
 若沒有 `OPENAI_API_KEY`，程式會改用簡單關鍵字備援，並明確標示：
 
@@ -255,13 +259,19 @@ uv run fastapi dev main.py
 ### 3. 執行單一 CLI 情境
 
 ```powershell
-uv run openingguard --scenario high_pressure --runs 30
+uv run openingguard --scenario high_pressure --profile demo
+```
+
+`demo` 固定使用 500 次 Monte Carlo。正式統計證據使用 2,000 次，且不在現場 Demo 即時計算：
+
+```powershell
+uv run openingguard --scenario high_pressure --profile evidence
 ```
 
 ### 4. 執行下游瓶頸情境並輸出完整 JSON
 
 ```powershell
-uv run openingguard --scenario downstream_bottleneck --runs 30 --json
+uv run openingguard --scenario downstream_bottleneck --profile demo --json
 ```
 
 ### 5. 設定 OpenAI Agent
@@ -271,10 +281,18 @@ API key 只能放在環境變數，不可提交到 Git：
 ```powershell
 $env:OPENAI_API_KEY="your-key"
 $env:OPENAI_MODEL="gpt-5.1"
-uv run openingguard --scenario high_pressure --runs 30 --agent
+uv run openingguard --scenario high_pressure --profile demo --agent
 ```
 
-### 6. 執行 12 筆人工標記的 Agent 評測
+預設三個 judge 都使用 `OPENAI_MODEL`。若 OpenAI project 有權限使用三個指定 model，可選擇設定：
+
+```powershell
+$env:OPENAI_JUDGE_MODELS="model-a,model-b,model-c"
+```
+
+同一組 OpenAI API key 即可發出三個請求；模型是否可用仍取決於 OpenAI project 權限。三個 judge 會平行呼叫以降低等待時間。
+
+### 6. 執行 15 筆人工標記的 Agent 評測
 
 ```powershell
 uv run openingguard --eval
@@ -294,20 +312,31 @@ Notebook 已嵌入執行結果，包含合成流量、peak RPS 分布、Monte Ca
 ### 8. 執行本機 Mock 下單容量校準
 
 ```powershell
-uv run openingguard-calibrate
+uv run openingguard-calibrate --profile quick
 ```
 
-此指令會自動在 `127.0.0.1:8010` 暫時啟動 FastAPI，測試結束後關閉，不占用正式串接的 8000 port。校準器會測試不同 offered concurrency 與目標 RPS，結果寫入 `calibration_results/latest.json`。
+此指令會自動在 `127.0.0.1:8010` 暫時啟動 FastAPI，測試結束後關閉，不占用正式串接的 8000 port。校準器會測試不同 offered concurrency 與目標 RPS，結果只寫入 `calibration_results/latest.json`，不會覆寫版本化情境。
 
-若要降低短時間測試的隨機波動，可延長每組量測時間：
+兩種模式：
+
+| profile | warm-up | 正式量測 | drain-out | 重複 | bootstrap | 用途 |
+|---|---:|---:|---:|---:|---:|---|
+| `quick` | 1 秒 | 每組 3 秒 | 2 秒 | 1 | 無 | 流程展示，僅 indicative |
+| `evidence` | 5 秒 | 每組 30 秒 | 2 秒 | 5 | 10,000 次 | 預先產生正式證據 |
+
+若以命令列覆寫 `evidence` 的時間、重複數或 bootstrap 次數且低於表中標準，輸出會自動降級，不標示為 `evidence_grade=true`。
+
+正式模式：
 
 ```powershell
-uv run openingguard-calibrate --duration 30 --warmup 5
+uv run openingguard-calibrate --profile evidence
 ```
 
-Mock pipeline 只包含三個合成階段：request validation、Database delay、gateway delay。預設平均延遲分別為 10、90、100 ms，並使用 deterministic lognormal 變異；它們不是實際 Database 或交易閘道。輸出包含平均與 P95 端到端延遲、內部服務時間、Queue wait、最大穩定目標 RPS，以及 concurrency 增加後的效率。結果只能稱為「本機 mock 校準」。
+Mock pipeline 只包含三個合成階段：request validation、Database delay、gateway delay。預設平均延遲分別為 10、90、100 ms，並使用 deterministic lognormal 變異；它們不是實際 Database 或交易閘道。輸出包含平均與 P95 端到端延遲、內部服務時間、Queue wait、最大穩定目標 RPS、concurrency 增加後的效率、重複間標準差，以及平均值的 bootstrap 95% interval。結果只能稱為「本機 mock 校準」。
 
-目前保存的 3 秒短校準結果，在 server concurrency 20 時量得平均內部工作約 199 ms、P95 server time 約 312 ms、closed-loop throughput 約 80.8 RPS、效率約 0.804；rate sweep 的最高安全目標為 80 RPS。安全條件同時要求 P95 低於 2 秒、錯誤率低於 0.1%，以及「完成吞吐量／目標 RPS」至少 0.90。短測只用來確認流程；正式引用前應改跑 30 秒以上並重複多次。
+最大穩定 RPS 必須讓所有 repetitions 同時符合：至少 99.9% 的有效請求在 2 秒內收到 `accepted`、server／transport error rate 低於 0.1%、P95 低於 2 秒、沒有 4xx 測試資料錯誤，且停止送入後 2 秒內 Queue 排空。4xx 另外記錄，不混入伺服器容量失敗。
+
+目前提交的 `calibration_results/latest.json` 已於 2026-09-04 使用新版 `quick` profile 重跑。在這台電腦與此 mock 設定下，120 target RPS 通過探索性門檻，160 target RPS 開始失敗；由於每組只量 3 秒且僅重複 1 次，輸出明列 `evidence_grade=false`、`claim_status=indicative_only`，不得引用為正式容量證據。
 
 ## API
 
@@ -322,7 +351,7 @@ Mock pipeline 只包含三個合成階段：request validation、Database delay�
 ```json
 {
   "scenario": "high_pressure",
-  "runs": 30,
+  "profile": "demo",
   "operation_note": "今晚部署新版下單服務，夜盤量能偏高，明早可能大量送單",
   "use_agent": true,
   "seed": 20260904
@@ -332,7 +361,8 @@ Mock pipeline 只包含三個合成階段：request validation、Database delay�
 | 欄位 | 型別 | 限制 | 說明 |
 |---|---|---|---|
 | `scenario` | string | 必須是既有情境 ID | 預設 `normal` |
-| `runs` | integer | 1～500 | Monte Carlo 次數，預設 30 |
+| `profile` | `demo` or `evidence` | 固定列舉 | 預設 `demo`；分別代表 500 與 2,000 次 Monte Carlo |
+| `runs` | integer or null | 1～2,000 | 選填；只供明確的自訂測試，指定後覆蓋 profile |
 | `operation_note` | string or null | 選填 | Agent 使用的營運備註；空值使用情境預設文字 |
 | `use_agent` | boolean | — | 是否執行風險選擇流程 |
 | `seed` | integer | — | 固定亂數種子 |
@@ -346,15 +376,18 @@ Mock pipeline 只包含三個合成階段：request validation、Database delay�
 | `simulator_version` | 本次使用的模擬器版本 |
 | `derived_parameters` | 公式與推導出的單台 worker 有效 RPS |
 | `synthetic_assumption` | 固定為 true，提醒數據是合成假設 |
-| `risk_matches` | Agent 選出的風險與可信目錄來源 |
+| `risk_matches` | Agent 選出的 `risk_id`、`severity`、投票、原文證據與可信目錄來源 |
+| `applied_risk_assumptions` | 實際套用的固定倍率；uncertain 會明列使用 high 預覽 |
 | `scenarios` | 三種策略的效能、風險與成本 |
 | `recommended` | 最低成本安全預熱方案；無安全方案時為 null |
 | `candidate_plans` | 所有 candidate worker 的評估結果 |
 | `warning` | worker-only 無解時的限制說明 |
-| `approval_status` | 固定為 `pending_human_approval` |
-| `agent` | Agent 模式、模型、tool call 與是否為真正 LLM 結果 |
+| `approval_status` | 一般為 `pending_human_approval`；無共識時為 `requires_human_review_uncertain_agent` |
+| `requires_human_review`／`auto_approved` | 一律要求人工核准且永不自動核准 |
+| `formal_pass_rule` | 明列以 Wilson 95% CI 上界判斷 5% 壅塞門檻 |
+| `agent` | judge 模式、模型、三份 tool output、彙整狀態與是否為真正 LLM 結果 |
 
-目前 API 刻意不接受呼叫端自行傳入 RPS、倍率、P50/P90/P99、market features 或 confidence。呼叫端只能選 `scenario_id`；Agent 只能選擇既有 `risk_id`，不能創造情境數值。若未來開放自訂參數，必須使用另一個受嚴格驗證的管理流程，不交由 LLM 直接填值。
+目前 API 刻意不接受呼叫端自行傳入 RPS、倍率、P50/P90/P99、market features 或 confidence。呼叫端只能透過 `scenario` 選擇既有情境；Agent 只能選擇既有 `risk_id` 與列舉的 `severity`，不能創造情境數值。若未來開放自訂參數，必須使用另一個受嚴格驗證的管理流程，不交由 LLM 直接填值。
 
 ### `POST /api/mock-orders`
 
@@ -392,7 +425,7 @@ Mock pipeline 只包含三個合成階段：request validation、Database delay�
 ```text
 backend/
 │
-├── README.md                         # 技術、參數與使用說明
+├── README.md
 ├── pyproject.toml                    # uv 專案與依賴設定
 ├── uv.lock                           # 鎖定後的完整依賴版本
 ├── .env.example                      # OpenAI 環境變數範例
@@ -402,7 +435,9 @@ backend/
 ├── notebooks/
 │   └── statistical_analysis.ipynb    # 統計分析、圖表與敏感度掃描
 ├── calibration_results/
-│   └── latest.json                    # 最近一次本機 mock 校準結果
+│   └── latest.json                    # 新版 quick profile 的探索性 mock 校準結果
+├── tests/
+│   └── test_policies.py               # 新決策規則的 regression tests
 │
 └── openingguard/
     ├── __init__.py                   # 套件版本
@@ -415,36 +450,59 @@ backend/
     ├── core.py                       # 流量、Queue、策略與容量搜尋核心
     └── data/
         ├── risk_catalog.json         # 10 種固定風險與倍率
-        ├── eval_cases.json           # 12 筆人工標記 Agent 案例
+        ├── eval_cases.json           # 15 筆人工標記 Agent 案例
         └── scenarios/
             ├── normal.json
             ├── high_pressure.json
             └── downstream_bottleneck.json
 ```
 
-## 現行驗證
+## 本版完成的實作
 
-- 相同輸入與 seed 可重現相同統計結果；`run_id` 與建立時間除外。
-- 三個 API 情境均可正常回傳。
-- normal 與 high-pressure 可產生 candidate recommendation。
-- downstream-bottleneck 會拒絕 worker-only 方案並回傳警告。
-- 沒有 API key 時，Agent 結果正確標示為非 LLM。
-- Notebook 13 個 code cells 已完整執行，內嵌 8 張圖，沒有 cell error。
+- [x] Monte Carlo 上限擴充至 2,000，並提供 `demo=500`、`evidence=2,000` profile。
+- [x] 容量方案改用 `congestion_probability_ci95.upper < 5%` 判定，不再只看點估計。
+- [x] Agent 改為三個 OpenAI judge，輸出固定 `risk_id + severity`，不允許輸出倍率或容量數字。
+- [x] 嚴重度使用兩個有序 0/1 欄位，並由 Python 驗證 `high` 必須同時滿足 `at_least_medium`。
+- [x] 無多數共識時保留 `uncertain`，模擬採固定 high 參數做最壞情境預覽，禁止自動核准。
+- [x] Agent 人工案例補上 severity 標記與 accuracy、macro-F1、coverage、quadratic weighted kappa 輸出。
+- [x] 校準器加入 quick／evidence profile、warm-up、30 秒量測、5 次重複、2 秒 drain-out 與 bootstrap mean 95% interval。
+- [x] 最大穩定 RPS 改為所有 repetitions 都需符合 99.9% within-SLO、錯誤率、P95 與 Queue 排空規則。
+- [x] 新增 Wilson 上界、Agent 多數決、uncertain→high 預覽與校準門檻的 regression tests。
+- [x] 完成 `uv sync --locked`、Python compile、7 項 regression tests 與 FastAPI smoke test。
+- [x] 使用 `seed=20260904, runs=500` 重跑統計 Notebook；13 個 code cells 全數成功且每個前面都有 Markdown 說明。
+- [x] 使用新版 quick profile 重跑本機 mock 校準，輸出明確標為探索性而非正式證據。
+
+### 2026-09-04 驗證摘要
+
+| 項目 | 結果 |
+|---|---|
+| 靜態／政策測試 | compile 成功；`unittest` 7/7 通過 |
+| FastAPI | `/api/health`、一般模擬、無 key 的離線 Agent 路徑皆回 200 |
+| 500-run 合成 high-pressure 情境 | fixed 83.6%、reactive 83.4%、predictive 0% 壅塞；predictive Wilson 95% 上界 0.76% |
+| 2,000-run 三策略效能基準 | 本機耗時 579.37 秒；適合離線證據，不適合 Demo 即時計算 |
+| quick mock 校準 | 探索性最大穩定 target RPS 120；160 RPS 時 P95 約 2031 ms、SLO 內接受率約 90.6%，且 2 秒內未排空 |
+| Notebook | 13 個 code cells、0 error、0 個缺少前置 Markdown 的 code cell |
+
+以上數字只代表固定 seed 的合成情境或同機 mock 實驗，不代表券商正式容量。
 
 ## 未完成與已知限制
 
+- [ ] 使用有效 API key 執行三個 OpenAI judge 與 15 筆人工案例評測。模型權限、實際延遲、token 成本、macro-F1 與 kappa 目前未知。
+- [ ] 同模型三個 judge 的輸出具有相關性，票數只是共識而非三個獨立統計樣本；需在報告中避免錯誤的獨立性宣稱。
+- [ ] 目前 severity gold labels 為小型人工測試集，尚未由第二位標註者覆核，也尚未計算人工標註者間一致性。
+- [ ] 執行正式 evidence 校準；目前只有 quick 結果。正式流程需依序測量多組 concurrency 與 RPS，每組 30 秒且重複 5 次，估計需數十分鐘。
+- [ ] 目前 Notebook 以 500-run Demo profile 重產；2,000-run 三策略基準已驗證可執行但耗時 579.37 秒，尚未把完整 evidence 輸出嵌回 Notebook。
+- [ ] `evidence` assessment 目前仍是同步 API；完整流程還會額外搜尋 6 個 worker 候選，可能讓互動請求等待過久。正式版應改為背景工作或限制 evidence 只從離線批次觸發。
 - [ ] 若未來需要自訂情境，另建受權限與 schema 保護的管理流程；現行公開模擬 API 維持只接受版本化 `scenario_id`。
 - [ ] 將容量搜尋擴充到 `maxReplicas`、concurrency、Queue threshold、預熱時間與多目標成本。
 - [ ] 將目前使用平均服務時間的有效 RPS，升級為逐筆服務時間分布並評估 SimPy 實作。
-- [ ] 將 Monte Carlo 上限由 500 擴充至離線 1,000+ runs，並加入平行運算與執行時間報告。
-- [ ] 建立 pytest 自動化測試、固定 regression baselines 與 CI。
-- [ ] 使用有效 API key 執行真正 OpenAI tool call，產生 12 筆案例的 Top-1、Top-3 與 no-match false-positive 指標。
+- [ ] 建立完整自動化測試、固定 regression baselines 與 CI。
 - [ ] 使用真實壓測資料校準 worker、DB、gateway、warmup 與 retry 參數。
 - [ ] 若取得去識別化逐筆事件時間，比較 Poisson、negative-binomial／Cox 與 Hawkes 的 out-of-sample fit。
 - [ ] 實作持久化 idempotency key、委託狀態機與「已接受但未成交」語意；目前不接真實 DB。
 - [ ] 串接公開新聞與市場行情，保留資料時間戳、來源與失敗降級機制。
 - [ ] 加入認證授權、rate limiting、structured logging、metrics、trace、Docker 與部署設定。
-- [ ] 與 API 呼叫端定稿 contract；目前舊 `後端.md` 的登入模型及範例格式已和下單版實作不一致。
+- [ ] 與 API 呼叫端定稿 contract；本版新增 `profile`、severity、judge votes 與信賴區間上界判定。
 
 ## 參考資料
 

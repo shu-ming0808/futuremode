@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from . import __version__
 from .agent import run_agent_assessment
-from .core import build_assessment, list_scenarios, load_scenario
+from .core import MONTE_CARLO_PROFILES, build_assessment, list_scenarios, load_scenario
 from .mock_order import SETTINGS as MOCK_ORDER_SETTINGS, process_mock_order
 from .schemas import MockOrderRequest, SimulationRequest
 
@@ -62,9 +62,22 @@ def simulate(body: SimulationRequest) -> dict[str, Any]:
     try:
         scenario = load_scenario(body.scenario)
         operation_note = body.operation_note or scenario["operation_note"]
+        runs = body.runs or MONTE_CARLO_PROFILES[body.profile]
+        run_profile = "custom" if body.runs is not None else body.profile
         if body.use_agent:
-            return run_agent_assessment(body.scenario, operation_note, body.runs, body.seed)
-        return build_assessment(body.scenario, body.runs, body.seed)
+            return run_agent_assessment(
+                body.scenario,
+                operation_note,
+                runs,
+                body.seed,
+                run_profile=run_profile,
+            )
+        return build_assessment(
+            body.scenario,
+            runs,
+            body.seed,
+            run_profile=run_profile,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

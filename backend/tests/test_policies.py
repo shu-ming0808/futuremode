@@ -1,0 +1,114 @@
+"""Regression tests for the agreed risk and statistical decision policies."""
+
+from argparse import Namespace
+from copy import deepcopy
+import unittest
+
+from openingguard.agent import _aggregate_judgments
+from openingguard.calibrate import CALIBRATION_PROFILES, _passes_rate_rule
+from openingguard.core import _passes_constraints, apply_risk_assumptions, load_scenario
+
+
+def _vote(judge_id: str, severity: str) -> dict:
+    bits = {
+        "low": (0, 0),
+        "medium": (1, 0),
+        "high": (1, 1),
+    }[severity]
+    return {
+        "judge_id": judge_id,
+        "no_confident_match": False,
+        "risk_matches": [
+            {
+                "risk_id": "market_volatility_order_spike",
+                "severity": severity,
+                "is_at_least_medium": bits[0],
+                "is_high": bits[1],
+                "matched_input_text": "大量送單",
+                "reason": "測試票",
+                "judge_id": judge_id,
+            }
+        ],
+    }
+
+
+class RiskPolicyTests(unittest.TestCase):
+    def test_three_way_severity_split_stays_uncertain_and_previews_high(self) -> None:
+        selection = _aggregate_judgments(
+            [_vote("market", "low"), _vote("capacity", "medium"), _vote("audit", "high")]
+        )
+        match = selection["risk_matches"][0]
+        self.assertEqual(match["severity"], "uncertain")
+        self.assertEqual(match["simulation_assumption"], "high")
+        self.assertTrue(selection["requires_human_review"])
+        self.assertFalse(selection["auto_approved"])
+
+    def test_two_high_votes_form_high_majority(self) -> None:
+        selection = _aggregate_judgments(
+            [_vote("market", "high"), _vote("capacity", "high"), _vote("audit", "medium")]
+        )
+        self.assertEqual(selection["risk_matches"][0]["severity"], "high")
+        self.assertEqual(selection["decision_status"], "confirmed")
+
+    def test_uncertain_risk_uses_catalog_high_effect_without_relabelling(self) -> None:
+        scenario = load_scenario("normal")
+        adjusted, audit = apply_risk_assumptions(
+            scenario,
+            [{"risk_id": "market_volatility_order_spike", "severity": "uncertain"}],
+        )
+        self.assertEqual(
+            adjusted["traffic"]["scenario_multiplier"],
+            scenario["traffic"]["scenario_multiplier"] * 2.0,
+        )
+        self.assertEqual(audit[0]["agent_severity"], "uncertain")
+        self.assertEqual(audit[0]["simulation_assumption"], "high")
+
+
+class StatisticalPolicyTests(unittest.TestCase):
+    def test_capacity_gate_uses_wilson_upper_bound(self) -> None:
+        scenario = load_scenario("normal")
+        result = {
+            "p95_latency_ms": 1000.0,
+            "timeout_rate": 0.0,
+            "congestion_probability": 0.04,
+            "congestion_probability_ci95": [0.025, 0.049],
+            "database_peak_utilization": 0.5,
+            "gateway_peak_utilization": 0.5,
+        }
+        self.assertTrue(_passes_constraints(result, scenario))
+        failed = deepcopy(result)
+        failed["congestion_probability_ci95"] = [0.026, 0.061]
+        self.assertFalse(_passes_constraints(failed, scenario))
+
+    def test_monte_carlo_profiles_are_fixed(self) -> None:
+        from openingguard.core import MONTE_CARLO_PROFILES
+
+        self.assertEqual(MONTE_CARLO_PROFILES, {"demo": 500, "evidence": 2_000})
+
+    def test_calibration_profiles_capture_warmup_measurement_and_drain(self) -> None:
+        evidence = CALIBRATION_PROFILES["evidence"]
+        self.assertEqual(evidence["warmup_seconds"], 5.0)
+        self.assertEqual(evidence["measurement_seconds"], 30.0)
+        self.assertEqual(evidence["drain_seconds"], 2.0)
+        self.assertEqual(evidence["repetitions"], 5)
+
+    def test_rate_gate_requires_999_within_slo_and_drained_queue(self) -> None:
+        args = Namespace(
+            slo_ms=2000.0,
+            min_accepted_within_slo_rate=0.999,
+            max_error_rate=0.001,
+        )
+        row = {
+            "p95_end_to_end_ms": 500.0,
+            "accepted_within_slo_rate": 0.999,
+            "error_rate": 0.0,
+            "client_rejections": 0,
+            "queue_drained_within_seconds": True,
+        }
+        self.assertTrue(_passes_rate_rule(row, args))
+        row["queue_drained_within_seconds"] = False
+        self.assertFalse(_passes_rate_rule(row, args))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -9,7 +9,7 @@ import sys
 from typing import Any
 
 from .agent import evaluate_llm, run_agent_assessment
-from .core import build_assessment, list_scenarios, load_scenario
+from .core import MONTE_CARLO_PROFILES, build_assessment, list_scenarios, load_scenario
 
 
 BOLD = "\033[1m"
@@ -31,12 +31,21 @@ def _compact(result: dict[str, Any] | None) -> str:
     if agent:
         lines.append(f"agent_mode: {agent['mode']} (is_llm={agent['is_llm_result']})")
     if result.get("risk_matches"):
-        lines.append("risk_ids: " + ", ".join(x["risk_id"] for x in result["risk_matches"]))
+        lines.append(
+            "risks: "
+            + ", ".join(
+                f"{item['risk_id']}={item.get('severity', 'n/a')}"
+                for item in result["risk_matches"]
+            )
+        )
     lines.append("")
-    lines.append("strategy                 congestion   p95(ms)   timeout    max_queue   worker-min")
+    lines.append(
+        "strategy                 congestion   CI95-high   p95(ms)   timeout    max_queue   worker-min"
+    )
     for item in result["scenarios"]:
         lines.append(
             f"{item['name']:<24} {item['congestion_probability']:>9.1%} "
+            f"{item['congestion_probability_ci95'][1]:>10.1%} "
             f"{item['p95_latency_ms']:>9.0f} {item['timeout_rate']:>9.2%} "
             f"{item['max_queue']:>11} {item['total_worker_minutes']:>12.1f}"
         )
@@ -48,18 +57,21 @@ def _compact(result: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-def _run(scenario_id: str, runs: int, use_agent: bool) -> dict[str, Any]:
+def _run(
+    scenario_id: str, runs: int, use_agent: bool, run_profile: str
+) -> dict[str, Any]:
     scenario = load_scenario(scenario_id)
     if use_agent:
         return run_agent_assessment(
             scenario_id=scenario_id,
             operation_note=scenario["operation_note"],
             runs=runs,
+            run_profile=run_profile,
         )
-    return build_assessment(scenario_id, runs=runs)
+    return build_assessment(scenario_id, runs=runs, run_profile=run_profile)
 
 
-def interactive(runs: int) -> None:
+def interactive(runs: int, run_profile: str) -> None:
     last: dict[str, Any] | None = None
     status = "選擇情境開始。"
     while True:
@@ -84,11 +96,11 @@ def interactive(runs: int) -> None:
                     "3": "downstream_bottleneck",
                 }[choice]
                 status = f"正在執行 {scenario_id}..."
-                last = _run(scenario_id, runs, False)
+                last = _run(scenario_id, runs, False, run_profile)
                 status = "完成確定性模擬。"
             elif choice == "a":
                 status = "正在執行 Agent 與容量工具..."
-                last = _run("high_pressure", runs, True)
+                last = _run("high_pressure", runs, True, run_profile)
                 status = "Agent 流程完成；請檢查 agent_mode 是否為真正 LLM。"
             elif choice == "e":
                 report = evaluate_llm()
@@ -105,19 +117,33 @@ def main() -> None:
         sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="OpeningGuard AI throwaway backend prototype")
     parser.add_argument("--scenario", choices=list_scenarios())
-    parser.add_argument("--runs", type=int, default=30, help="1-500; Demo 建議 30，離線報告用 500")
+    parser.add_argument(
+        "--profile",
+        choices=MONTE_CARLO_PROFILES,
+        default="demo",
+        help="demo=500 次；evidence=2,000 次",
+    )
+    parser.add_argument(
+        "--runs",
+        type=int,
+        help="自訂 1-2,000 次；指定後覆蓋 profile",
+    )
     parser.add_argument("--agent", action="store_true", help="使用 OpenAI Agent；無 key 時明確降級")
-    parser.add_argument("--eval", action="store_true", help="執行 12 筆 LLM gold-set 評測")
+    parser.add_argument("--eval", action="store_true", help="執行 15 筆 LLM gold-set 評測")
     parser.add_argument("--json", action="store_true", help="輸出完整 JSON")
     args = parser.parse_args()
+    runs = args.runs or MONTE_CARLO_PROFILES[args.profile]
+    if not 1 <= runs <= 2_000:
+        parser.error("runs 必須介於 1～2,000")
+    run_profile = "custom" if args.runs is not None else args.profile
     if args.eval:
         print(json.dumps(evaluate_llm(), ensure_ascii=False, indent=2))
         return
     if args.scenario:
-        result = _run(args.scenario, args.runs, args.agent)
+        result = _run(args.scenario, runs, args.agent, run_profile)
         print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else _compact(result))
         return
-    interactive(args.runs)
+    interactive(runs, run_profile)
 
 
 if __name__ == "__main__":

@@ -23,8 +23,11 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 DATA_DIR = PACKAGE_DIR / "data"
 SCENARIO_DIR = DATA_DIR / "scenarios"
 DT = 0.1
-SIMULATOR_VERSION = "0.1.0-batch-prototype"
+SIMULATOR_VERSION = "0.2.0-batch-prototype"
 STRATEGIES = ("fixed_capacity", "reactive_autoscaling", "predictive_prewarm")
+MONTE_CARLO_PROFILES = {"demo": 500, "evidence": 2_000}
+MAX_MONTE_CARLO_RUNS = MONTE_CARLO_PROFILES["evidence"]
+RISK_SEVERITIES = {"low", "medium", "high", "uncertain"}
 
 
 @dataclass
@@ -97,17 +100,31 @@ def validate_scenario(s: dict[str, Any]) -> None:
 
 
 def apply_risk_assumptions(
-    scenario: dict[str, Any], risk_ids: Iterable[str], severity: str = "medium"
-) -> tuple[dict[str, Any], list[str]]:
-    """Apply only predefined catalog effects; never invent numeric multipliers."""
+    scenario: dict[str, Any], risk_matches: Iterable[dict[str, Any] | str]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Apply only catalog effects selected by risk ID and an enumerated severity.
+
+    An uncertain judge result is intentionally simulated with the catalog's high
+    assumptions, but remains labelled uncertain in the returned audit record.
+    """
     result = deepcopy(scenario)
     catalog = {item["risk_id"]: item for item in load_risk_catalog()}
-    applied: list[str] = []
-    for risk_id in dict.fromkeys(risk_ids):
+    applied: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_match in risk_matches:
+        match = {"risk_id": raw_match, "severity": "medium"} if isinstance(raw_match, str) else raw_match
+        risk_id = str(match["risk_id"])
+        if risk_id in seen:
+            continue
+        seen.add(risk_id)
         item = catalog.get(risk_id)
         if not item:
             continue
-        effects = item.get("simulation_assumptions", {}).get(severity, {})
+        agent_severity = str(match.get("severity", "medium"))
+        if agent_severity not in RISK_SEVERITIES:
+            raise ValueError(f"未知風險程度：{agent_severity}")
+        simulation_severity = "high" if agent_severity == "uncertain" else agent_severity
+        effects = item.get("simulation_assumptions", {}).get(simulation_severity, {})
         for key, value in effects.items():
             if key == "arrival_multiplier":
                 result["traffic"]["scenario_multiplier"] *= float(value)
@@ -121,8 +138,14 @@ def apply_risk_assumptions(
                 result["capacity"]["worker_warmup_seconds"] *= float(value)
             elif key == "max_retries":
                 result["retry"]["max_retries"] = int(value)
-        if effects:
-            applied.append(risk_id)
+        applied.append(
+            {
+                "risk_id": risk_id,
+                "agent_severity": agent_severity,
+                "simulation_assumption": simulation_severity,
+                "effects": effects,
+            }
+        )
     validate_scenario(result)
     return result, applied
 
@@ -371,15 +394,18 @@ def summarize_runs(strategy: str, runs: list[dict[str, Any]]) -> dict[str, Any]:
     }
     for key in numeric_mean:
         result[key] = float(np.mean([run[key] for run in runs]))
+    result["congestion_probability_ci95_upper"] = result[
+        "congestion_probability_ci95"
+    ][1]
     result["cost"] = result["total_worker_minutes"]
     return result
 
 
 def compare_strategies(
-    scenario: dict[str, Any], runs: int = 30, seed: int = 20260904
+    scenario: dict[str, Any], runs: int = 500, seed: int = 20260904
 ) -> list[dict[str, Any]]:
-    if not 1 <= runs <= 500:
-        raise ValueError("runs 必須介於 1～500")
+    if not 1 <= runs <= MAX_MONTE_CARLO_RUNS:
+        raise ValueError(f"runs 必須介於 1～{MAX_MONTE_CARLO_RUNS}")
     collected = {strategy: [] for strategy in STRATEGIES}
     for run_index in range(runs):
         trace_seed = seed + run_index * 1009
@@ -396,14 +422,15 @@ def _passes_constraints(result: dict[str, Any], scenario: dict[str, Any]) -> boo
     return (
         result["p95_latency_ms"] < float(slo["latency_seconds"]) * 1000
         and result["timeout_rate"] < float(slo["max_timeout_rate"])
-        and result["congestion_probability"] < float(slo["max_congestion_probability"])
+        and result["congestion_probability_ci95"][1]
+        < float(slo["max_congestion_probability"])
         and result["database_peak_utilization"] < float(slo["downstream_safe_utilization"])
         and result["gateway_peak_utilization"] < float(slo["downstream_safe_utilization"])
     )
 
 
 def search_capacity_plan(
-    scenario: dict[str, Any], runs: int = 30, seed: int = 20260904
+    scenario: dict[str, Any], runs: int = 500, seed: int = 20260904
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     candidates: list[dict[str, Any]] = []
     for workers in scenario.get("candidate_workers", [6, 8, 10, 12, 14, 16]):
@@ -436,17 +463,18 @@ def search_capacity_plan(
 
 def build_assessment(
     scenario_id: str,
-    runs: int = 30,
+    runs: int = 500,
     seed: int = 20260904,
     risk_matches: list[dict[str, Any]] | None = None,
     apply_risks: bool = False,
+    run_profile: str = "custom",
 ) -> dict[str, Any]:
     scenario = load_scenario(scenario_id)
     matches = risk_matches or []
-    selected_ids = [item["risk_id"] for item in matches]
-    applied: list[str] = []
-    if apply_risks and selected_ids:
-        scenario, applied = apply_risk_assumptions(scenario, selected_ids, "medium")
+    applied: list[dict[str, Any]] = []
+    if apply_risks and matches:
+        scenario, applied = apply_risk_assumptions(scenario, matches)
+    has_uncertain_risk = any(item.get("severity") == "uncertain" for item in matches)
     comparison = compare_strategies(scenario, runs=runs, seed=seed)
     recommended, candidates = search_capacity_plan(scenario, runs=runs, seed=seed)
     baseline_minutes = (
@@ -465,6 +493,7 @@ def build_assessment(
             "min_replicas": recommended["workers"],
             "prewarm_at": "08:50",
             "congestion_probability": recommended["congestion_probability"],
+            "congestion_probability_ci95": recommended["congestion_probability_ci95"],
             "p95_latency_ms": recommended["p95_latency_ms"],
             "timeout_rate": recommended["timeout_rate"],
             "total_worker_minutes": recommended["total_worker_minutes"],
@@ -487,13 +516,22 @@ def build_assessment(
         "synthetic_assumption": True,
         "random_seed": seed,
         "runs": runs,
+        "run_profile": run_profile,
         "risk_matches": matches,
-        "applied_medium_risk_assumptions": applied,
+        "applied_risk_assumptions": applied,
         "scenarios": comparison,
         "recommended": recommendation,
         "candidate_plans": candidates,
         "warning": warning,
-        "approval_status": "pending_human_approval",
+        "approval_status": (
+            "requires_human_review_uncertain_agent"
+            if has_uncertain_risk
+            else "pending_human_approval"
+        ),
+        "requires_human_review": True,
+        "auto_approved": False,
+        "uncertain_risk_preview": has_uncertain_risk,
+        "formal_pass_rule": "congestion_probability_ci95.upper < max_congestion_probability",
         "limitations": [
             "合成 RPS，不代表任何券商真實容量",
             "100 ms 批次 FIFO 模型，不是正式交易系統",

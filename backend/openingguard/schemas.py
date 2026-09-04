@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field
 
 class SimulationRequest(BaseModel):
     scenario: str = "normal"
-    runs: int = Field(default=30, ge=1, le=500)
+    profile: Literal["demo", "evidence"] = "demo"
+    runs: int | None = Field(default=None, ge=1, le=2_000)
     operation_note: str | None = None
     use_agent: bool = False
     seed: int = 20260904
