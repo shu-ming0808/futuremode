@@ -11,6 +11,8 @@ OpeningGuard AI 是券商內部使用的開盤容量決策 Demo。系統以合�
 
 所有 RPS、容量與成本都是 **Synthetic Demo Assumption**，不代表任何券商真實數據。系統不連接真實下單服務，也不自動修改基礎設施；建議固定停在 `pending_human_approval`。
 
+完整的產品需求、Agent 邊界、統計假設與評審問題整理於 [`docs/後端.md`](docs/後端.md)。
+
 ## 系統流程圖
 
 ```mermaid
@@ -432,6 +434,8 @@ backend/
 ├── main.py                           # FastAPI ASGI 入口
 ├── schemas.py                        # 舊入口的相容匯入
 │
+├── docs/
+│   └── 後端.md                       # 後端需求、技術決策與驗證狀態
 ├── notebooks/
 │   └── statistical_analysis.ipynb    # 統計分析、圖表與敏感度掃描
 ├── calibration_results/
