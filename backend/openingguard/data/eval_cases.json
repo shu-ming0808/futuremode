@@ -1,0 +1,14 @@
+[
+  {"test_id":"eval_001","operation_note":"明早可能因海外市場劇烈震盪出現集中送單","expected_risk_ids":["market_volatility_order_spike"],"case_type":"single_risk"},
+  {"test_id":"eval_002","operation_note":"今晚更換商品資料，預期所有終端盤前重新抓取","expected_risk_ids":["release_product_file_download"],"case_type":"single_risk"},
+  {"test_id":"eval_003","operation_note":"監控顯示 DB pool 幾乎沒有空閒連線","expected_risk_ids":["database_connection_saturation"],"case_type":"single_risk"},
+  {"test_id":"eval_004","operation_note":"下游每秒接受量固定，擴充 API pod 仍沒有改善","expected_risk_ids":["gateway_rate_limit"],"case_type":"single_risk"},
+  {"test_id":"eval_005","operation_note":"App 等不到回覆就立刻再送一次，尖峰越來越高","expected_risk_ids":["retry_storm"],"case_type":"single_risk"},
+  {"test_id":"eval_006","operation_note":"入口等待數上升，但資料庫與閘道還有餘裕","expected_risk_ids":["worker_capacity_saturation"],"case_type":"single_risk"},
+  {"test_id":"eval_007","operation_note":"擴容觸發後容器要四十秒才 ready，尖峰早已發生","expected_risk_ids":["cold_start_autoscaling_delay"],"case_type":"single_risk"},
+  {"test_id":"eval_008","operation_note":"重啟後快取命中率很低，查詢大量打到 DB","expected_risk_ids":["cache_cold_start","database_connection_saturation"],"case_type":"multi_risk"},
+  {"test_id":"eval_009","operation_note":"DNS 偶發解析失敗，同時客戶端不停重送","expected_risk_ids":["network_dependency_failure","retry_storm"],"case_type":"multi_risk"},
+  {"test_id":"eval_010","operation_note":"今晚發版且擴容節點啟動時間比平常久","expected_risk_ids":["release_product_file_download","cold_start_autoscaling_delay"],"case_type":"multi_risk"},
+  {"test_id":"eval_011","operation_note":"明天辦公室冷氣保養","expected_risk_ids":[],"case_type":"no_match"},
+  {"test_id":"eval_012","operation_note":"營運沒有回報任何系統或市場異常","expected_risk_ids":[],"case_type":"no_match"}
+]

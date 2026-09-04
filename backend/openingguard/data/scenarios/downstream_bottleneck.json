@@ -1,0 +1,12 @@
+{
+  "scenario_id": "downstream_bottleneck",
+  "label": "市場壓力＋下游容量下降＋立即重試",
+  "duration_seconds": 300,
+  "operation_note": "交易閘道回應變慢且資料庫連線池接近滿載，客戶端目前會立即重試",
+  "traffic": {"baseline_rps": 250, "scenario_multiplier": 2.4, "open_spike_ratio": 1.6, "decay_seconds": 90, "intensity_sigma": 0.14, "burst_sigma": 0.20},
+  "capacity": {"current_workers": 6, "target_workers": 16, "worker_capacity_rps": 80, "worker_warmup_seconds": 30, "queue_threshold": 250, "queue_capacity": 12000, "db_connections": 12, "db_rps_per_connection": 45, "gateway_rps": 560},
+  "slo": {"latency_seconds": 2.0, "max_timeout_rate": 0.001, "max_congestion_probability": 0.05, "downstream_safe_utilization": 0.95},
+  "retry": {"policy": "immediate", "max_retries": 2, "base_delay_seconds": 0.1, "max_backoff_seconds": 0.5},
+  "candidate_workers": [6, 8, 10, 12, 14, 16],
+  "synthetic_assumption": true
+}

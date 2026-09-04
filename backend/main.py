@@ -1,9 +1,5 @@
-from fastapi import FastAPI
+"""ASGI entry point for the OpeningGuard backend."""
 
-app = FastAPI()
+from openingguard.api import app
 
-
-
-@app.get("/")
-def read_root():
-    return {"Hello": "World"}
+__all__ = ["app"]

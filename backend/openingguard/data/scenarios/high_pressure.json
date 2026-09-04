@@ -1,0 +1,12 @@
+{
+  "scenario_id": "high_pressure",
+  "label": "市場壓力＋版本更新",
+  "duration_seconds": 300,
+  "operation_note": "今晚部署新版下單服務，夜盤量能偏高，明早開盤可能大量送單",
+  "traffic": {"baseline_rps": 260, "scenario_multiplier": 1.6, "open_spike_ratio": 1.55, "decay_seconds": 75, "intensity_sigma": 0.13, "burst_sigma": 0.18},
+  "capacity": {"current_workers": 6, "target_workers": 14, "worker_capacity_rps": 80, "worker_warmup_seconds": 30, "queue_threshold": 300, "queue_capacity": 12000, "db_connections": 20, "db_rps_per_connection": 60, "gateway_rps": 1200},
+  "slo": {"latency_seconds": 2.0, "max_timeout_rate": 0.001, "max_congestion_probability": 0.05, "downstream_safe_utilization": 0.95},
+  "retry": {"policy": "backoff_jitter", "max_retries": 2, "base_delay_seconds": 0.25, "max_backoff_seconds": 1.0},
+  "candidate_workers": [6, 8, 10, 12, 14, 16],
+  "synthetic_assumption": true
+}

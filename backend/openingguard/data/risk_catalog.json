@@ -1,0 +1,122 @@
+[
+  {
+    "risk_id": "market_volatility_order_spike",
+    "title": "市場劇烈波動造成下單尖峰",
+    "trigger_signals": ["夜盤", "大跌", "大漲", "熔斷", "量能", "大量送單"],
+    "affected_components": ["order_api", "worker", "queue"],
+    "failure_mechanism": "短時間委託到達率高於處理容量，造成 FIFO Queue 與逾時",
+    "recommended_actions": ["提前預熱", "敏感度測試", "監看 Queue"],
+    "source_url": "https://www.sec.gov/files/rules/sro/nyse/2021/34-92428-ex3.pdf",
+    "source_type": "exchange_regulatory_filing",
+    "evidence_strength": "medium",
+    "simulation_assumptions": {"low": {"arrival_multiplier": 1.2}, "medium": {"arrival_multiplier": 1.5}, "high": {"arrival_multiplier": 2.0}}
+  },
+  {
+    "risk_id": "release_product_file_download",
+    "title": "盤前版本或商品檔更新形成共享資源壓力",
+    "trigger_signals": ["部署", "新版", "版本更新", "商品檔", "全量下載", "盤前更新"],
+    "affected_components": ["network", "database", "order_api"],
+    "failure_mechanism": "盤前同步作業與開盤請求重疊，占用共享容量並拉長服務時間",
+    "recommended_actions": ["錯開更新", "提前預熱", "限制非核心下載"],
+    "source_url": "https://m.esunsec.com.tw/news/instant-detail.aspx?id=%7B910B8C5A-40C3-4E7A-AFA9-A970BE30542D%7D",
+    "source_type": "official_incident_notice",
+    "evidence_strength": "high",
+    "simulation_assumptions": {"low": {"worker_capacity_multiplier": 0.95}, "medium": {"worker_capacity_multiplier": 0.9}, "high": {"worker_capacity_multiplier": 0.75}}
+  },
+  {
+    "risk_id": "database_connection_saturation",
+    "title": "Database connection pool 飽和",
+    "trigger_signals": ["資料庫", "連線池", "connection pool", "查詢變慢", "DB", "滿載"],
+    "affected_components": ["database", "worker"],
+    "failure_mechanism": "連線名額耗盡使 worker 持續等待，壅塞向入口 Queue 傳播",
+    "recommended_actions": ["調查慢查詢", "降低非核心讀寫", "調整連線容量"],
+    "source_url": "https://www.cna.com.tw/news/afe/202408050100.aspx",
+    "source_type": "news_with_company_response",
+    "evidence_strength": "medium",
+    "simulation_assumptions": {"low": {"db_capacity_multiplier": 0.9}, "medium": {"db_capacity_multiplier": 0.7}, "high": {"db_capacity_multiplier": 0.5}}
+  },
+  {
+    "risk_id": "gateway_rate_limit",
+    "title": "交易閘道吞吐上限或限流",
+    "trigger_signals": ["交易閘道", "gateway", "限流", "429", "下游上限", "回應變慢"],
+    "affected_components": ["gateway", "worker", "queue"],
+    "failure_mechanism": "下游每秒接受委託量固定，增加 worker 不能提高端到端吞吐",
+    "recommended_actions": ["入口限流", "協調下游容量", "停止 worker-only 擴容"],
+    "source_url": "https://docs.aws.amazon.com/wellarchitected/2023-04-10/framework/rel_mitigate_interaction_failure_limit_retries.html",
+    "source_type": "cloud_engineering_guidance",
+    "evidence_strength": "medium",
+    "simulation_assumptions": {"low": {"gateway_capacity_multiplier": 0.9}, "medium": {"gateway_capacity_multiplier": 0.7}, "high": {"gateway_capacity_multiplier": 0.5}}
+  },
+  {
+    "risk_id": "retry_storm",
+    "title": "逾時後立即重試放大負載",
+    "trigger_signals": ["立即重試", "retry", "重試", "timeout", "逾時", "thundering herd"],
+    "affected_components": ["order_api", "queue", "database", "gateway"],
+    "failure_mechanism": "原請求仍在後端執行時新增重試，將一次使用者意圖放大成多次 attempt",
+    "recommended_actions": ["exponential backoff", "full jitter", "retry budget", "idempotency key"],
+    "source_url": "https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/",
+    "source_type": "cloud_engineering_guidance",
+    "evidence_strength": "high",
+    "simulation_assumptions": {"low": {"max_retries": 1}, "medium": {"max_retries": 2}, "high": {"max_retries": 3}}
+  },
+  {
+    "risk_id": "worker_capacity_saturation",
+    "title": "Order worker 有效並行容量不足",
+    "trigger_signals": ["worker", "CPU", "thread", "處理能力", "queue 堆積", "忙碌"],
+    "affected_components": ["worker", "queue"],
+    "failure_mechanism": "worker slots 被長時間占用，入口 Queue 增長並超過 SLO",
+    "recommended_actions": ["預熱 worker", "壓測單 worker 吞吐", "監看利用率"],
+    "source_url": "https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/",
+    "source_type": "official_technical_documentation",
+    "evidence_strength": "medium",
+    "simulation_assumptions": {"low": {"worker_capacity_multiplier": 0.9}, "medium": {"worker_capacity_multiplier": 0.75}, "high": {"worker_capacity_multiplier": 0.6}}
+  },
+  {
+    "risk_id": "cold_start_autoscaling_delay",
+    "title": "反應式擴容與 cold start 太晚",
+    "trigger_signals": ["冷啟動", "cold start", "warmup", "啟動慢", "autoscaling", "HPA"],
+    "affected_components": ["worker", "autoscaler"],
+    "failure_mechanism": "監控、觸發及啟動延遲超過尖峰形成時間，容量到位前已累積 Queue",
+    "recommended_actions": ["開盤前預熱", "量測 readiness", "調整觸發門檻"],
+    "source_url": "https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/",
+    "source_type": "official_technical_documentation",
+    "evidence_strength": "high",
+    "simulation_assumptions": {"low": {"warmup_multiplier": 1.2}, "medium": {"warmup_multiplier": 1.5}, "high": {"warmup_multiplier": 2.0}}
+  },
+  {
+    "risk_id": "cache_cold_start",
+    "title": "Cache cold start 拉長服務時間",
+    "trigger_signals": ["cache", "快取", "cold cache", "重建快取", "命中率"],
+    "affected_components": ["worker", "database"],
+    "failure_mechanism": "快取未命中增加 DB 讀取與服務長尾",
+    "recommended_actions": ["盤前暖快取", "監看命中率", "限制重建流量"],
+    "source_url": "https://aws.amazon.com/builders-library/avoiding-insurmountable-queue-backlogs/",
+    "source_type": "cloud_engineering_guidance",
+    "evidence_strength": "medium",
+    "simulation_assumptions": {"low": {"db_capacity_multiplier": 0.95}, "medium": {"db_capacity_multiplier": 0.8}, "high": {"db_capacity_multiplier": 0.6}}
+  },
+  {
+    "risk_id": "network_dependency_failure",
+    "title": "網路或外部依賴異常",
+    "trigger_signals": ["網路", "DNS", "load balancer", "連線錯誤", "依賴服務", "封包遺失"],
+    "affected_components": ["network", "gateway"],
+    "failure_mechanism": "連線錯誤與長逾時占用 worker，並誘發客戶端重試",
+    "recommended_actions": ["人工檢查依賴", "熔斷", "限制重試"],
+    "source_url": "https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/",
+    "source_type": "cloud_engineering_guidance",
+    "evidence_strength": "medium",
+    "simulation_assumptions": {"low": {}, "medium": {}, "high": {}}
+  },
+  {
+    "risk_id": "unknown_unquantified_risk",
+    "title": "知識庫未涵蓋或不可量化的營運風險",
+    "trigger_signals": ["不確定", "未知", "特殊活動", "人工確認"],
+    "affected_components": ["manual_review"],
+    "failure_mechanism": "現有證據與模擬參數不足，強行量化會製造虛假精確度",
+    "recommended_actions": ["人工確認", "補充證據", "執行敏感度分析"],
+    "source_url": "https://developers.openai.com/api/docs/guides/function-calling",
+    "source_type": "project_safety_boundary",
+    "evidence_strength": "low",
+    "simulation_assumptions": {"low": {}, "medium": {}, "high": {}}
+  }
+]
