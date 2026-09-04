@@ -19,3 +19,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["openingguard"]
+
+[dependency-groups]
+dev = [
+    "jupyterlab>=4.4",
+    "matplotlib>=3.10",
+    "pandas>=2.3",
+    "seaborn>=0.13",
+]

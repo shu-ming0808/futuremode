@@ -57,3 +57,12 @@ Agent 會從固定風險目錄選擇 `risk_id`，再透過 OpenAI Responses API 
 - `openingguard/data/eval_cases.json`：12 筆人工標記 Agent 評測案例。
 
 目前使用 100 ms 批次 FIFO 模型；客戶端逾時不取消後端工作，重試沿用同一概念 UUID 並排到隊尾。這不是正式防重複交易保證，真實系統仍需持久化 idempotency key 與交易狀態。
+
+## 統計圖表 Notebook
+
+Notebook 內每個程式區塊前都有簡短說明，並包含合成流量、尖峰分布、Monte Carlo 信賴區間、策略成本、參數掃描與下游硬上限圖表：
+
+```powershell
+uv sync --dev
+uv run jupyter lab notebooks/statistical_analysis.ipynb
+```
