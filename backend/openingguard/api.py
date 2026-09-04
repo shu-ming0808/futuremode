@@ -13,6 +13,24 @@ from .core import build_assessment, list_scenarios, load_scenario
 from .schemas import SimulationRequest
 
 
+DEFAULT_LOCAL_ORIGINS = ",".join(
+    (
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    )
+)
+
+
+def allowed_origins() -> list[str]:
+    return [
+        origin.strip()
+        for origin in os.getenv("CORS_ORIGINS", DEFAULT_LOCAL_ORIGINS).split(",")
+        if origin.strip()
+    ]
+
+
 app = FastAPI(
     title="OpeningGuard AI Prototype",
     version=__version__,
@@ -20,7 +38,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins(),
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )

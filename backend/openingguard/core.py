@@ -77,7 +77,9 @@ def validate_scenario(s: dict[str, Any]) -> None:
         "baseline_rps": t.get("baseline_rps"),
         "scenario_multiplier": t.get("scenario_multiplier"),
         "current_workers": c.get("current_workers"),
-        "worker_capacity_rps": c.get("worker_capacity_rps"),
+        "worker_concurrency": c.get("worker_concurrency"),
+        "mean_service_time_seconds": c.get("mean_service_time_seconds"),
+        "worker_efficiency": c.get("worker_efficiency"),
         "db_connections": c.get("db_connections"),
         "db_rps_per_connection": c.get("db_rps_per_connection"),
         "gateway_rps": c.get("gateway_rps"),
@@ -86,6 +88,8 @@ def validate_scenario(s: dict[str, Any]) -> None:
     invalid = [name for name, value in positive.items() if value is None or float(value) <= 0]
     if invalid:
         raise ValueError(f"欄位必須大於 0：{', '.join(invalid)}")
+    if float(c["worker_efficiency"]) > 1:
+        raise ValueError("worker_efficiency 必須介於 0～1")
     if retry.get("policy") not in {"none", "immediate", "backoff_jitter"}:
         raise ValueError("retry.policy 必須是 none、immediate 或 backoff_jitter")
     if not 0 <= int(retry.get("max_retries", 0)) <= 3:
@@ -108,7 +112,7 @@ def apply_risk_assumptions(
             if key == "arrival_multiplier":
                 result["traffic"]["scenario_multiplier"] *= float(value)
             elif key == "worker_capacity_multiplier":
-                result["capacity"]["worker_capacity_rps"] *= float(value)
+                result["capacity"]["worker_efficiency"] *= float(value)
             elif key == "db_capacity_multiplier":
                 result["capacity"]["db_rps_per_connection"] *= float(value)
             elif key == "gateway_capacity_multiplier":
@@ -121,6 +125,15 @@ def apply_risk_assumptions(
             applied.append(risk_id)
     validate_scenario(result)
     return result, applied
+
+
+def effective_worker_rps(capacity: dict[str, Any]) -> float:
+    """Derive per-worker throughput from concurrency, service time, and efficiency."""
+    return (
+        float(capacity["worker_concurrency"])
+        / float(capacity["mean_service_time_seconds"])
+        * float(capacity["worker_efficiency"])
+    )
 
 
 def generate_arrival_trace(scenario: dict[str, Any], seed: int) -> np.ndarray:
@@ -259,7 +272,7 @@ def simulate_trace(
         ):
             scale_ready_tick = tick + round(float(c["worker_warmup_seconds"]) / DT)
 
-        worker_cap = int(current_workers * float(c["worker_capacity_rps"]) * DT)
+        worker_cap = int(current_workers * effective_worker_rps(c) * DT)
         db_tick_cap = int(float(c["db_connections"]) * float(c["db_rps_per_connection"]) * DT)
         gateway_tick_cap = int(float(c["gateway_rps"]) * DT)
         capacity = max(0, min(worker_cap, db_tick_cap, gateway_tick_cap))
@@ -467,6 +480,10 @@ def build_assessment(
         "scenario": scenario_id,
         "scenario_version": scenario["scenario_version"],
         "label": scenario.get("label", scenario_id),
+        "derived_parameters": {
+            "effective_worker_rps_per_worker": effective_worker_rps(scenario["capacity"]),
+            "formula": "worker_concurrency / mean_service_time_seconds * worker_efficiency",
+        },
         "synthetic_assumption": True,
         "random_seed": seed,
         "runs": runs,

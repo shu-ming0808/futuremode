@@ -1,11 +1,11 @@
 {
   "scenario_id": "normal",
-  "scenario_version": "2026-09-04-v1",
+  "scenario_version": "2026-09-04-v2",
   "label": "正常開盤",
   "duration_seconds": 300,
   "operation_note": "例行營運，今晚沒有部署或已知下游異常",
   "traffic": {"baseline_rps": 190, "scenario_multiplier": 1.0, "open_spike_ratio": 1.55, "decay_seconds": 75, "intensity_sigma": 0.08, "burst_sigma": 0.10},
-  "capacity": {"current_workers": 6, "target_workers": 10, "worker_capacity_rps": 80, "worker_warmup_seconds": 30, "queue_threshold": 300, "queue_capacity": 12000, "db_connections": 20, "db_rps_per_connection": 60, "gateway_rps": 1200},
+  "capacity": {"current_workers": 6, "target_workers": 10, "worker_concurrency": 20, "mean_service_time_seconds": 0.2, "worker_efficiency": 0.8, "worker_warmup_seconds": 30, "queue_threshold": 300, "queue_capacity": 12000, "db_connections": 20, "db_rps_per_connection": 60, "gateway_rps": 1200},
   "slo": {"latency_seconds": 2.0, "max_timeout_rate": 0.001, "max_congestion_probability": 0.05, "downstream_safe_utilization": 0.95},
   "retry": {"policy": "backoff_jitter", "max_retries": 2, "base_delay_seconds": 0.25, "max_backoff_seconds": 1.0},
   "candidate_workers": [6, 8, 10, 12, 14, 16],

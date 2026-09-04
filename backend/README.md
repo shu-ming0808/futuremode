@@ -116,7 +116,7 @@ $$
 
 這個最小值設計用來呈現「一直增加 worker 不是答案」：只要 DB 或交易閘道先達上限，worker 容量再高也不會提升端到端吞吐。
 
-目前 `worker_capacity_rps` 是單機有效吞吐的簡化參數，尚未拆成 concurrency 與服務時間分布。
+目前每台 worker 使用 `concurrency ÷ mean service time × efficiency` 推導有效 RPS。`mean_service_time_seconds` 仍是合成平均值，尚未逐筆抽樣服務時間分布。
 
 ## 三種容量策略
 
@@ -164,11 +164,11 @@ $$
 
 ### 系統容量參數
 
-| 情境 | current workers | target workers | 單機 RPS | warmup 秒 | Queue 門檻／容量 | DB connections × RPS | Gateway RPS |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| `normal` | 6 | 10 | 80 | 30 | 300／12,000 | 20 × 60 = 1,200 | 1,200 |
-| `high_pressure` | 6 | 14 | 80 | 30 | 300／12,000 | 20 × 60 = 1,200 | 1,200 |
-| `downstream_bottleneck` | 6 | 16 | 80 | 30 | 250／12,000 | 12 × 45 = 540 | 560 |
+| 情境 | current／target workers | concurrency | 平均服務秒數 | efficiency | 推導單機 RPS | warmup 秒 | Queue 門檻／容量 | DB 上限 | Gateway RPS |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `normal` | 6／10 | 20 | 0.2 | 0.8 | 80 | 30 | 300／12,000 | 20 × 60 = 1,200 | 1,200 |
+| `high_pressure` | 6／14 | 20 | 0.2 | 0.8 | 80 | 30 | 300／12,000 | 20 × 60 = 1,200 | 1,200 |
+| `downstream_bottleneck` | 6／16 | 20 | 0.2 | 0.8 | 80 | 30 | 250／12,000 | 12 × 45 = 540 | 560 |
 
 ### SLO 與重試參數
 
@@ -178,7 +178,7 @@ $$
 | `high_pressure` | 2 秒 | 0.1% | 5% | 95% | backoff + jitter | 2 | base 0.25 秒，max 1 秒 |
 | `downstream_bottleneck` | 2 秒 | 0.1% | 5% | 95% | immediate | 2 | 0.1 秒 |
 
-三組情境都使用 candidate workers `[6, 8, 10, 12, 14, 16]`。目前情境版本為 `2026-09-04-v1`，設定檔由 Git 管理；每次結果也回傳 `scenario_version` 與 `simulator_version`，使報告能追溯使用哪一版參數。數值是可替換的 Demo 假設，應在取得壓測或營運資料後建立新版本，不直接覆寫舊結果的解讀依據。
+三組情境都使用 candidate workers `[6, 8, 10, 12, 14, 16]`。目前情境版本為 `2026-09-04-v2`，設定檔由 Git 管理；v2 將直接填寫的 80 RPS 改為 `20 ÷ 0.2 × 0.8 = 80 RPS`。每次結果也回傳 `scenario_version` 與 `simulator_version`，使報告能追溯使用哪一版參數。數值是可替換的 Demo 假設，應在取得壓測或營運資料後建立新版本。
 
 ## 容量方案搜尋
 
@@ -249,6 +249,8 @@ uv run fastapi dev main.py
 ```
 
 開發伺服器預設為 `http://127.0.0.1:8000`，互動文件為 `http://127.0.0.1:8000/docs`。
+
+本專案採同一台電腦串接。呼叫端使用 `POST http://127.0.0.1:8000/api/simulate`；CORS 預設只允許本機的 3000 與 5173 port，可用 `CORS_ORIGINS` 環境變數覆寫。
 
 ### 3. 執行單一 CLI 情境
 
@@ -324,6 +326,7 @@ Notebook 已嵌入執行結果，包含合成流量、peak RPS 分布、Monte Ca
 | `run_id` | 本次執行 UUID |
 | `scenario_version` | 本次使用的固定情境參數版本 |
 | `simulator_version` | 本次使用的模擬器版本 |
+| `derived_parameters` | 公式與推導出的單台 worker 有效 RPS |
 | `synthetic_assumption` | 固定為 true，提醒數據是合成假設 |
 | `risk_matches` | Agent 選出的風險與可信目錄來源 |
 | `scenarios` | 三種策略的效能、風險與成本 |
@@ -396,7 +399,7 @@ backend/
 
 - [ ] 若未來需要自訂情境，另建受權限與 schema 保護的管理流程；現行公開模擬 API 維持只接受版本化 `scenario_id`。
 - [ ] 將容量搜尋擴充到 `maxReplicas`、concurrency、Queue threshold、預熱時間與多目標成本。
-- [ ] 把單機 RPS 拆成 concurrency 與服務時間分布，評估逐筆離散事件或 SimPy 實作。
+- [ ] 將目前使用平均服務時間的有效 RPS，升級為逐筆服務時間分布並評估 SimPy 實作。
 - [ ] 將 Monte Carlo 上限由 500 擴充至離線 1,000+ runs，並加入平行運算與執行時間報告。
 - [ ] 建立 pytest 自動化測試、固定 regression baselines 與 CI。
 - [ ] 使用有效 API key 執行真正 OpenAI tool call，產生 12 筆案例的 Top-1、Top-3 與 no-match false-positive 指標。
