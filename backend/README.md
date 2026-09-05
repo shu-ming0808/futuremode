@@ -9,35 +9,21 @@ OpeningGuard AI 是券商內部使用的開盤容量決策 Demo。系統以合�
 1. 開盤尖峰發生時，提前預熱是否能比反應式擴容更早控制 Queue 與延遲？
 2. 當 Database 或交易閘道已成為硬上限時，為什麼繼續增加 worker 仍無法解決壅塞？
 
-所有 RPS、容量與成本都是 **Synthetic Demo Assumption**，不代表任何券商真實數據。系統不連接真實下單服務，也不自動修改基礎設施；建議固定停在 `pending_human_approval`。
+所有 RPS、容量與成本都是 **Synthetic Demo Assumption**，不代表任何券商真實數據。系統不連接真實下單服務，也不會真的修改基礎設施；Demo 只產生容量建議。
 
-完整的產品需求、Agent 邊界、統計假設與評審問題整理於 [`docs/後端.md`](docs/後端.md)。
+完整的產品需求、Agent 邊界、統計假設與評審問題整理於 [`docs/後端.md`](docs/後端.md)。新的同預算事件實驗定義、資訊隔離與可宣稱範圍整理於 [`docs/同預算事件實驗.md`](docs/同預算事件實驗.md)。
 
 ## 系統流程圖
 
 ```mermaid
 flowchart TD
-    A["結構化情境參數"] --> D["容量評估工具"]
-    B["自然語言營運備註"] --> C["三個 OpenAI Judge<br/>選擇 risk_id + severity"]
-    C --> D
-    E["固定風險目錄<br/>與預先定義倍率"] --> C
-    E --> D
-
-    D --> F["合成下單到達率"]
-    F --> G["單一 FIFO Queue"]
-    G --> H["API Workers"]
-    H --> I["Database 硬上限"]
-    I --> J["交易閘道硬上限"]
-
-    D --> K["固定容量"]
-    D --> L["反應式 Autoscaling"]
-    D --> M["預測式預熱"]
-    K --> N["Monte Carlo 指標與 95% CI"]
-    L --> N
-    M --> N
-    N --> O["最低成本安全方案<br/>或無解警告"]
-    O --> P["等待工程師人工核准"]
+    A["輸入營運備註"] --> B["AI Agent 判斷風險與嚴重度"]
+    B --> C["依固定情境參數模擬下單與比較容量方案"]
+    C --> D["提供容量建議或瓶頸警告"]
+    D --> E["展示模擬結果"]
 ```
+
+模擬比較「固定容量、反應式擴容、提前預熱」三種策略。Agent 負責判斷風險；後端使用版本化的固定參數計算容量、延遲與成本。
 
 ## 技術架構
 
@@ -132,6 +118,8 @@ $$
 
 目前反應式策略是一次由 current 跳到 target，不包含逐批擴容、scale-down、CPU 指標或 Kubernetes HPA 的完整控制迴路。
 
+上表描述的是既有 5 分鐘 API 模擬器。成本與動態縮容的主要證據改由下方「同預算事件實驗」提供；本次沒有更動前後端 API 介面。
+
 ## 壅塞判定與統計指標
 
 任一條件成立就把該次模擬判為壅塞：
@@ -211,8 +199,8 @@ gateway peak utilization < 95%
 7. 每個 judge 必須呼叫 strict function tool `submit_risk_judgment`；模型不得輸出倍率、RPS 或 worker 數。
 8. Python 彙整三票並從可信目錄補上來源 URL，再依 `risk_id + severity` 套用固定倍率。
 9. 多數票決定 `low`、`medium` 或 `high`。沒有多數共識時保留 `severity=uncertain`，但以固定的 `high` 參數產生最壞情境預覽。
-10. `uncertain` 必須回傳 `requires_human_review=true`、`auto_approved=false`，不得自動部署或把預覽冒充正式判斷。
-11. Python 執行模擬並以確定性文字整理結果；最終容量決策一律等待人工核准。
+10. 有明確多數共識的結果直接產生容量建議，不額外要求人工核准。
+11. `uncertain` 才回傳 `requires_human_review=true`，並只呈現 high 最壞情境預覽。
 
 ### 風險嚴重度與固定倍率
 
@@ -232,6 +220,12 @@ gateway peak utilization < 95%
 實際 rubric prompt 存放在 `openingguard.agent._judge_instructions`，版本為 `openingguard-agent-v3-few-shot`。固定 prompt 與 examples 放在請求前段，待判斷的 `target_operation_note` 放在最後；strict function schema 仍透過 Responses API 的 `tools` 欄位傳入，不靠文字解析 JSON。
 
 沒有 `OPENAI_API_KEY` 時，Agent 路徑直接失敗（CLI 顯示錯誤，`/api/assessments` 回 503），不會用關鍵字結果冒充 LLM 判斷。需要離線 demo 時設定 `AGENT_PROVIDER=mock`：三個 judge 改由確定性關鍵字 stub 回覆，但仍走完整的 tool schema、驗證與多數決流程。mock 結果不能當成 Agent 準確率證據。
+
+### 真實事故人工標註候選
+
+`openingguard/data/manual_label_candidates.json` 另存 14 筆真實事故與來源。AI 依容量影響 rubric 提出第一版 `risk_id`、嚴重度、原文證據及理由後，已由使用者逐筆覆核並核准；目前分布為低 2 筆、中 6 筆、高 6 筆，每筆都標示 `reviewer=user` 與 `review_status=user_approved_first_version`。本階段不要求第二位標註者。這批資料尚未加入 few-shot 或 held-out 評測，必須先決定資料切分，避免同一事故同時進入 prompt 與評測集；詳見 [`docs/人工標註說明.md`](docs/人工標註說明.md)。
+
+資料明確拆分公司直接損失、客戶補償、監管罰款及錯誤交易名目金額。來源未公開金額時保留 `null`，不得把它解讀成零損失，也不得讓 Agent 依金額產生容量倍率。
 
 ## 快速開始
 
@@ -363,9 +357,9 @@ Mock pipeline 只包含三個合成階段：request validation、Database delay�
 | `recommended` | 最低成本安全預熱方案；無安全方案時為 `null` |
 | `warning_code` | 目前只有 `no_feasible_plan`；對應顯示文案見 `openingguard/data/frontend_copy.json`，由前端維護 |
 | `risks` | 合併後的風險卡片：`risk_id`、`title`、`severity`、judge 引用的原文、目錄來源、套用到模擬的實際倍率（`effects`） |
-| `requires_human_review` | 是否需要人工核准（風險判斷不確定，或原本就一律要求人工核准） |
+| `requires_human_review` | judge 無法形成明確共識時為 `true`；confirmed 結果為 `false` |
 
-Agent 判斷細節（三個 judge 各自投票、模型名稱、tool-call response id 等）與 Monte Carlo 候選方案全量掃描不對外回傳，因為前端畫面不需要分辨判斷來源或展示掃描過程；如需除錯，改讀後端 log。
+Agent 判斷細節（三個 judge 各自投票、模型名稱、執行來源與 tool-call response id 等）和 Monte Carlo 候選方案全量掃描不對外回傳；如需除錯，改讀後端 log。
 
 目前 API 刻意不接受呼叫端自行傳入 RPS、倍率、P50/P90/P99、market features 或 confidence。呼叫端只能透過 `scenario` 選擇既有情境；Agent 只能選擇既有 `risk_id` 與列舉的 `severity`，不能創造情境數值。若未來開放自訂參數，必須使用另一個受嚴格驗證的管理流程，不交由 LLM 直接填值。
 
@@ -413,7 +407,8 @@ backend/
 ├── docs/
 │   └── 後端.md                       # 後端需求、技術決策與驗證狀態
 ├── notebooks/
-│   └── statistical_analysis.ipynb    # 統計分析、圖表與敏感度掃描
+│   ├── statistical_analysis.ipynb    # 舊版 5 分鐘容量分析（保留供對照）
+│   └── event_budget_analysis.ipynb   # 同預算事件驅動實驗（預設不執行）
 ├── calibration_results/
 │   └── latest.json                    # 新版 quick profile 的探索性 mock 校準結果
 ├── tests/
@@ -429,18 +424,49 @@ backend/
     ├── agent.py                      # Responses API tool calling 與評測
     ├── mock_order.py                 # 三階段 mock 下單服務
     ├── core.py                       # 流量、Queue、策略與容量搜尋核心
+    ├── budget_experiment.py          # 一小時同預算、事件與 truth 隔離的實驗
     └── data/
         ├── risk_catalog.json         # 10 種固定風險與倍率
         ├── prompt_examples.json      # 12 筆人工標記 few-shot 範例
         ├── eval_cases.json           # 15 筆 held-out Agent 評測案例
+        ├── manual_label_candidates.json # 14 筆使用者核准的真實事故標註與來源
         └── scenarios/
             ├── normal.json
             ├── high_pressure.json
             └── downstream_bottleneck.json
 ```
 
+## 同預算事件實驗（新版）
+
+新版研究 Notebook 比較五組策略：固定 12、固定時段、Queue 反應式、事件驅動，以及知道真實尖峰時間的參考組。共同限制為一小時最多 720 worker-minutes；動態策略平時使用 8 workers，需要時預熱至 24，需求下降後依控制器逐步縮回，不再為了用滿預算而固定維持 15 分鐘。30 秒 warmup 仍計費。
+
+事件資料和模擬真值完全分開。Agent 只看當時已有時間戳的公開資訊，只選 `risk_id + severity`；固定 JSON 政策決定容量。Notebook 收錄正常、正確早報、非固定時段、誤報、漏報、晚報、長尖峰與下游瓶頸，預設不執行大量模擬或付費 API。詳細限制見 [`docs/同預算事件實驗.md`](docs/同預算事件實驗.md)。
+
+### 動態縮容控制器
+
+事件、定時、反應式與 perfect-timing 策略共用相同的縮容規則，避免只替本專案策略設計有利條件：
+
+```text
+8 baseline
+→ 30 秒 warmup（已配置 24、可服務仍為 8）
+→ 24 burst（ready 後至少維持 120 秒）
+→ 15 秒滾動利用率與 Queue 必須連續 60 秒保持低檔
+→ 20 warm pool 維持 90 秒
+→ 再次確認低負載後降回 8
+```
+
+低負載同時要求利用率不高於 55% 且 Queue 不超過 100；重新擴容門檻為利用率至少 85% 或 Queue 至少 300，兩組門檻形成 hysteresis，避免 worker 數在臨界值附近反覆震盪。若 20-worker 暖備期間流量反彈，20 workers 先提供約 1,600 RPS 合成容量，額外 4 workers 同時重新 warmup。所有控制只讀取過去的 Queue 與流量窗，不偷看未來 truth。
+
+單次 `seed=2026090500` 機制 replay 中，正常日／誤報日／真尖峰日分別使用 480／538／718 worker-minutes，固定 12 workers 為 720；三者此次 SLO 內完成率皆為 100%。這只是 state-machine smoke evidence，不是多日統計結論，正式比較仍需執行 held-out Monte Carlo。
+
 ## 本版完成的實作
 
+- [x] 新增一小時、720 worker-minutes 上限的同預算實驗，公平比較固定 12 與 8/24 pulse。
+- [x] 新增固定時段、反應式、事件驅動與 perfect-timing reference；同 case/seed 共用 arrival trace。
+- [x] 將公開事件輸入與未來 traffic truth 分離，並以測試阻止隱藏 RPS／真值進入 Agent payload。
+- [x] 新增正常、早報、非固定時段、誤報、漏報、晚報、長尖峰與下游瓶頸案例。
+- [x] 新增 `event_budget_analysis.ipynb`；大量模擬、敏感度與付費 LLM 預設關閉。
+- [x] 新增 minimum hold、連續低負載確認、20-worker warm pool、hysteresis 與反彈重新預熱的動態縮容控制器。
 - [x] Monte Carlo 上限擴充至 2,000，並提供 `demo=500`、`evidence=2,000` profile。
 - [x] 容量方案改用 `congestion_probability_ci95.upper < 5%` 判定，不再只看點估計。
 - [x] Agent 改為三個 OpenAI judge，輸出固定 `risk_id + severity`，不允許輸出倍率或容量數字。
@@ -451,7 +477,7 @@ backend/
 - [x] 校準器加入 quick／evidence profile、warm-up、30 秒量測、5 次重複、2 秒 drain-out 與 bootstrap mean 95% interval。
 - [x] 最大穩定 RPS 改為所有 repetitions 都需符合 99.9% within-SLO、錯誤率、P95 與 Queue 排空規則。
 - [x] 新增 Wilson 上界、Agent 多數決、uncertain→high 預覽與校準門檻的 regression tests。
-- [x] 完成 `uv sync --locked`、Python compile、9 項 regression tests 與 FastAPI smoke test。
+- [x] 完成 `uv sync --locked`、Python compile、19 項 regression tests 與 FastAPI smoke test。
 - [x] 使用 `seed=20260904, runs=500` 重跑統計 Notebook；13 個 code cells 全數成功且每個前面都有 Markdown 說明。
 - [x] 使用新版 quick profile 重跑本機 mock 校準，輸出明確標為探索性而非正式證據。
 
@@ -459,7 +485,7 @@ backend/
 
 | 項目 | 結果 |
 |---|---|
-| 靜態／政策測試 | compile 成功；`unittest` 9/9 通過 |
+| 靜態／政策測試 | compile 成功；`unittest` 19/19 通過 |
 | FastAPI | `/api/health` 與一般模擬回 200；無 key 的 Agent 請求回 503 |
 | 500-run 合成 high-pressure 情境 | fixed 83.6%、reactive 83.4%、predictive 0% 壅塞；predictive Wilson 95% 上界 0.76% |
 | 2,000-run 三策略效能基準 | 本機耗時 579.37 秒；適合離線證據，不適合 Demo 即時計算 |
@@ -470,9 +496,15 @@ backend/
 
 ## 未完成與已知限制
 
+- [ ] 新的同預算 Notebook 尚未執行 held-out 100-run 主實驗與敏感度掃描，因此目前不能宣稱事件策略優於固定 12 或定時策略。
+- [ ] `fixture_NOT_LLM` 只驗證事件進入政策的機制；尚未用有效 API key 測量真正 OpenAI Agent 的判斷品質、推論延遲與成本。
+- [ ] 已實作單次事件的動態縮容與反彈重新預熱；尚未支援同一小時多個獨立事件、跨事件冷卻政策及資料驅動參數最佳化。
+- [ ] 同預算主實驗刻意不含 retries；重試放大與 idempotency 應另做 ablation，不能混入主效果。
+- [ ] 歷史事故資料仍是回顧式案例，尚無帶「訊號可取得時間、尖峰開始時間」的前瞻資料，因此不能證明真實世界提前預警能力。
 - [ ] 使用有效 API key 執行三個 OpenAI judge 與 15 筆人工案例評測。模型權限、實際延遲、token 成本、macro-F1 與 kappa 目前未知。
 - [ ] 同模型三個 judge 的輸出具有相關性，票數只是共識而非三個獨立統計樣本；需在報告中避免錯誤的獨立性宣稱。
-- [ ] 目前 severity gold labels 為小型人工測試集，尚未由第二位標註者覆核，也尚未計算人工標註者間一致性。
+- [ ] 14 筆真實事故已完成使用者核准的第一版單人標註，但尚未切分成 few-shot 與 held-out；切分前不得併入 prompt 或用來宣稱模型準確率。
+- [ ] 第一版不要求第二位標註者，因此目前不能報告人工標註者間一致性；若未來要把資料升級為論文級 gold labels，再補獨立覆核與裁決。
 - [ ] 執行正式 evidence 校準；目前只有 quick 結果。正式流程需依序測量多組 concurrency 與 RPS，每組 30 秒且重複 5 次，估計需數十分鐘。
 - [ ] 目前 Notebook 以 500-run Demo profile 重產；2,000-run 三策略基準已驗證可執行但耗時 579.37 秒，尚未把完整 evidence 輸出嵌回 Notebook。
 - [ ] `evidence` assessment 目前仍是同步 API；完整流程還會額外搜尋 6 個 worker 候選，可能讓互動請求等待過久。正式版應改為背景工作或限制 evidence 只從離線批次觸發。
