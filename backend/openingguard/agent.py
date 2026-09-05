@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import json
-import logging
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from functools import lru_cache
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from pydantic import create_model
+from pydantic_ai import Agent, ModelRetry
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelResponse,
+    ToolCallPart,
+    UserPromptPart,
+)
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from .core import (
     DATA_DIR,
@@ -19,16 +27,15 @@ from .core import (
     load_scenario,
 )
 from .schemas import (
+    AggregatedRiskMatch,
     Assessment,
-    RiskMatch,
+    JudgeConsensus,
+    JudgeVote,
     SubmitRiskJudgment,
     SubmitRiskJudgmentMatch,
 )
 from .settings import SETTINGS
 
-logger = logging.getLogger(__name__)
-
-DEFAULT_MODEL = "gpt-5.1"
 PROMPT_VERSION = "openingguard-agent-v3-few-shot"
 KB_VERSION = "risk-catalog-v2"
 PROMPT_EXAMPLES_FILE = DATA_DIR / "prompt_examples.json"
@@ -48,6 +55,7 @@ JUDGE_ROLES = (
     ),
 )
 SEVERITY_ORDER = ("low", "medium", "high")
+JUDGE_RETRIES = 2
 
 
 def _catalog_for_prompt() -> list[dict[str, Any]]:
@@ -62,6 +70,7 @@ def _catalog_for_prompt() -> list[dict[str, Any]]:
     return [{key: item[key] for key in fields} for item in load_risk_catalog()]
 
 
+@lru_cache
 def load_prompt_examples() -> dict[str, Any]:
     """Load and validate human-approved few-shot examples separately from eval data."""
     payload = json.loads(PROMPT_EXAMPLES_FILE.read_text(encoding="utf-8"))
@@ -95,11 +104,9 @@ def load_prompt_examples() -> dict[str, Any]:
                 raise ValueError(
                     "prompt example 的 matched_input_text 必須逐字出現在備註"
                 )
-            medium = match.get("is_at_least_medium")
-            high = match.get("is_high")
-            if medium not in (0, 1) or high not in (0, 1):
-                raise ValueError("prompt example 的 severity bits 只能是 0 或 1")
-            _bits_to_severity(int(medium), int(high))
+            # Validate examples through the judges' own output schema: an example
+            # the schema would reject is an example teaching the model to fail.
+            SubmitRiskJudgmentMatch.model_validate(match)
             seen_risks.add(risk_id)
     return payload
 
@@ -119,292 +126,221 @@ def _judgment_model(risk_ids: tuple[str, ...]) -> type[SubmitRiskJudgment]:
     )
 
 
-def _judge_tool_schema() -> dict[str, Any]:
-    from openai import pydantic_function_tool
-
-    risk_ids = tuple(item["risk_id"] for item in load_risk_catalog())
-    function = pydantic_function_tool(
-        _judgment_model(risk_ids),
-        name="submit_risk_judgment",
-        description=(
-            "Select up to three catalog risk IDs and classify capacity impact using "
-            "two ordered binary decisions. Never invent numeric multipliers or capacity."
-        ),
-    )["function"]
-    name = function["name"]
-    description = function.get("description", "")
-    strict = function.get("strict", True)
-    raw_parameters = function.get("parameters")
-    assert raw_parameters is not None
-    parameters: dict[str, Any] = raw_parameters
-    properties: dict[str, Any] = parameters["properties"]
-    risk_matches_schema: dict[str, Any] = properties["risk_matches"]
-    risk_matches_schema["maxItems"] = 3
-    return {
-        "type": "function",
-        "name": name,
-        "description": description,
-        "strict": strict,
-        "parameters": parameters,
-    }
-
-
-def _bits_to_severity(is_at_least_medium: int, is_high: int) -> str:
-    if is_high and not is_at_least_medium:
-        raise ValueError("is_high=1 時，is_at_least_medium 必須為 1")
-    if is_high:
-        return "high"
-    if is_at_least_medium:
-        return "medium"
-    return "low"
-
-
-def _validate_judgment(
-    judgment: dict[str, Any], operation_note: str, judge_id: str
-) -> dict[str, Any]:
-    known = {item["risk_id"] for item in load_risk_catalog()}
-    matches = judgment.get("risk_matches", [])
-    if bool(judgment.get("no_confident_match")) == bool(matches):
-        raise ValueError("no_confident_match 必須與 risk_matches 是否為空一致")
-    seen: set[str] = set()
-    validated: list[dict[str, Any]] = []
-    for match in matches:
-        risk_id = str(match["risk_id"])
-        if risk_id not in known:
-            raise ValueError(f"Agent 回傳未知 risk_id：{risk_id}")
-        if risk_id in seen:
-            raise ValueError(f"同一 judge 重複回傳 risk_id：{risk_id}")
-        seen.add(risk_id)
-        quote = str(match["matched_input_text"])
-        if not quote or quote not in operation_note:
-            raise ValueError("Agent 的 matched_input_text 必須是營運備註的非空原文")
-        severity = _bits_to_severity(
-            int(match["is_at_least_medium"]), int(match["is_high"])
-        )
-        validated.append({**match, "severity": severity, "judge_id": judge_id})
-    return {
-        "judge_id": judge_id,
-        "risk_matches": validated,
-        "no_confident_match": not bool(validated),
-    }
-
-
-def _aggregate_judgments(judgments: list[dict[str, Any]]) -> dict[str, Any]:
-    by_risk: dict[str, list[dict[str, Any]]] = defaultdict(list)
+def _aggregate_judgments(judgments: list[JudgeVote]) -> JudgeConsensus:
+    by_risk: dict[str, list[tuple[str, SubmitRiskJudgmentMatch]]] = defaultdict(list)
     for judgment in judgments:
-        for match in judgment["risk_matches"]:
-            by_risk[match["risk_id"]].append(match)
+        for match in judgment.risk_matches:
+            by_risk[match.risk_id].append((judgment.judge_id, match))
 
-    aggregated: list[dict[str, Any]] = []
+    aggregated: list[AggregatedRiskMatch] = []
     for risk_id, votes in by_risk.items():
-        severity_counts = Counter(vote["severity"] for vote in votes)
-        majority = [name for name, count in severity_counts.items() if count >= 2]
+        severity_counts: Counter[Literal["low", "medium", "high"]] = Counter(
+            match.severity for _, match in votes
+        )
+        majority: list[Literal["low", "medium", "high"]] = [
+            name for name, count in severity_counts.items() if count >= 2
+        ]
         risk_has_majority = len(votes) >= 2
-        severity = (
+        severity: Literal["low", "medium", "high", "uncertain"] = (
             majority[0] if risk_has_majority and len(majority) == 1 else "uncertain"
         )
+        simulation_assumption: Literal["low", "medium", "high"] = (
+            "high" if severity == "uncertain" else severity
+        )
         aggregated.append(
-            {
-                "risk_id": risk_id,
-                "severity": severity,
-                "simulation_assumption": "high"
-                if severity == "uncertain"
-                else severity,
-                "selected_by_judges": len(votes),
-                "judge_count": len(judgments),
-                "severity_votes": {
+            AggregatedRiskMatch(
+                risk_id=risk_id,
+                severity=severity,
+                simulation_assumption=simulation_assumption,
+                selected_by_judges=len(votes),
+                judge_count=len(judgments),
+                severity_votes={
                     label: severity_counts.get(label, 0) for label in SEVERITY_ORDER
                 },
-                "binary_vote_sums": {
+                binary_vote_sums={
                     "is_at_least_medium": sum(
-                        int(vote["is_at_least_medium"]) for vote in votes
+                        match.is_at_least_medium for _, match in votes
                     ),
-                    "is_high": sum(int(vote["is_high"]) for vote in votes),
+                    "is_high": sum(match.is_high for _, match in votes),
                 },
-                "matched_input_text": votes[0]["matched_input_text"],
-                "evidence_quotes": list(
-                    dict.fromkeys(vote["matched_input_text"] for vote in votes)
+                matched_input_text=votes[0][1].matched_input_text,
+                evidence_quotes=list(
+                    dict.fromkeys(match.matched_input_text for _, match in votes)
                 ),
-                "reason": "；".join(
-                    f"{vote['judge_id']}: {vote['reason']}" for vote in votes
+                reason="；".join(
+                    f"{judge_id}: {match.reason}" for judge_id, match in votes
                 ),
-            }
+            )
         )
 
     aggregated.sort(
         key=lambda item: (
-            -item["selected_by_judges"],
-            -(item["severity_votes"]["high"] * 2 + item["severity_votes"]["medium"]),
-            item["risk_id"],
+            -item.selected_by_judges,
+            -(item.severity_votes["high"] * 2 + item.severity_votes["medium"]),
+            item.risk_id,
         )
     )
     aggregated = aggregated[:3]
-    has_uncertain = any(item["severity"] == "uncertain" for item in aggregated)
-    confirmed = [item for item in aggregated if item["severity"] != "uncertain"]
+    has_uncertain = any(item.severity == "uncertain" for item in aggregated)
+    confirmed = [item for item in aggregated if item.severity != "uncertain"]
     if has_uncertain:
         decision_status = "uncertain"
     elif confirmed:
         decision_status = "confirmed"
     else:
         decision_status = "no_match"
-    return {
-        "risk_matches": aggregated,
-        "no_confident_match": not bool(confirmed),
-        "decision_status": decision_status,
-        "requires_human_review": has_uncertain,
-        "auto_approved": False,
-        "judge_count": len(judgments),
-        "judgments": judgments,
-    }
+    return JudgeConsensus(
+        risk_matches=aggregated,
+        no_confident_match=not bool(confirmed),
+        decision_status=decision_status,
+        requires_human_review=has_uncertain,
+        judge_count=len(judgments),
+        judgments=judgments,
+    )
 
 
-def _offline_select(operation_note: str) -> dict[str, Any]:
-    """Demo continuity only. This is not presented as an LLM result."""
-    lowered = operation_note.lower()
-    if any(
-        phrase in lowered for phrase in ("沒有部署或已知", "沒有回報任何", "例行營運")
-    ):
-        return {
-            "risk_matches": [],
-            "no_confident_match": True,
-            "decision_status": "no_match",
-            "requires_human_review": False,
-            "auto_approved": False,
-        }
-    scored: list[tuple[int, dict[str, Any], str]] = []
-    for item in load_risk_catalog():
-        hits = [
-            signal for signal in item["trigger_signals"] if signal.lower() in lowered
-        ]
-        if hits:
-            scored.append((len(hits), item, hits[0]))
-    scored.sort(key=lambda row: (-row[0], row[1]["risk_id"]))
-    matches = [
-        {
-            "risk_id": item["risk_id"],
-            "severity": "uncertain",
-            "simulation_assumption": "high",
-            "selected_by_judges": 0,
-            "judge_count": 0,
-            "severity_votes": {"low": 0, "medium": 0, "high": 0},
-            "matched_input_text": hit,
-            "evidence_quotes": [hit],
-            "reason": f"離線關鍵字只辨識到「{hit}」，不能代替 LLM 嚴重度判斷。",
-        }
-        for _, item, hit in scored[:3]
-    ]
-    return {
-        "risk_matches": matches,
-        "no_confident_match": True,
-        "decision_status": "uncertain" if matches else "no_match",
-        "requires_human_review": bool(matches),
-        "auto_approved": False,
-    }
-
-
-def _to_risk_matches(matches: list[dict[str, Any]]) -> list[RiskMatch]:
-    """Drop any risk_id the model may have hallucinated outside the fixed catalog."""
-    known = {item["risk_id"] for item in load_risk_catalog()}
-    return [
-        RiskMatch(
-            risk_id=match["risk_id"],
-            severity=match["severity"],
-            matched_input_text=match["matched_input_text"],
-        )
-        for match in matches
-        if match["risk_id"] in known
-    ]
-
-
-def _judge_models() -> list[str]:
-    configured = list(SETTINGS.agent.openai_judge_models)
-    if not configured:
-        configured = [SETTINGS.agent.openai_model or DEFAULT_MODEL]
-    if len(configured) == 1:
-        return configured * len(JUDGE_ROLES)
-    if len(configured) != len(JUDGE_ROLES):
-        raise ValueError(
-            "OPENAI_JUDGE_MODELS 必須提供一個模型，或依三個 judge 提供三個模型"
-        )
-    return configured
+@lru_cache
+def _judge_instructions_template() -> str:
+    return JUDGE_INSTRUCTIONS_FILE.read_text(encoding="utf-8")
 
 
 def _judge_instructions(judge_id: str, perspective: str) -> str:
     """Stable rubric prompt; the strict output schema remains in the tools field."""
-    template = JUDGE_INSTRUCTIONS_FILE.read_text(encoding="utf-8")
-    return template.format(judge_id=judge_id, perspective=perspective)
+    return _judge_instructions_template().format(
+        judge_id=judge_id, perspective=perspective
+    )
 
 
-def _llm_judge(
-    operation_note: str,
-    scenario_id: str,
-    judge_id: str,
-    perspective: str,
-    model: str,
-) -> tuple[dict[str, Any], Any]:
-    from openai import OpenAI
+def _mock_judgment(operation_note: str) -> dict[str, Any]:
+    """Deterministic stand-in for a judge's tool call; keyword-matched, not LLM reasoning."""
+    lowered = operation_note.lower()
+    matches = []
+    for item in load_risk_catalog():
+        hits = [
+            signal for signal in item["trigger_signals"] if signal.lower() in lowered
+        ]
+        if hits and len(matches) < 3:
+            matches.append(
+                {
+                    "risk_id": item["risk_id"],
+                    "is_at_least_medium": 1,
+                    "is_high": 0,
+                    "matched_input_text": hits[0],
+                    "reason": f"mock judge：關鍵字「{hits[0]}」命中 {item['risk_id']}",
+                }
+            )
+    return {"risk_matches": matches, "no_confident_match": not matches}
 
+
+def _mock_model_function(
+    messages: list[ModelMessage], info: AgentInfo
+) -> ModelResponse:
+    user_part = messages[-1].parts[-1]
+    assert isinstance(user_part, UserPromptPart)
+    assert isinstance(user_part.content, str)
+    note = json.loads(user_part.content)["target_operation_note"]
+    tool = info.output_tools[0]
+    return ModelResponse(
+        parts=[ToolCallPart(tool_name=tool.name, args=_mock_judgment(note))]
+    )
+
+
+def _judge_agent(
+    judge_id: str, perspective: str, operation_note: str
+) -> Agent[None, Any]:
+    """Build a judge whose output validator can reject a quote against this note."""
+    risk_ids = tuple(item["risk_id"] for item in load_risk_catalog())
+    agent = Agent(
+        model=f"openai:{SETTINGS.agent.openai_model}",
+        output_type=_judgment_model(risk_ids),
+        instructions=_judge_instructions(judge_id, perspective),
+        retries=JUDGE_RETRIES,
+        # Resolve the provider lazily so the offline mock can override the model
+        # without an OpenAI key present at construction time.
+        defer_model_check=True,
+    )
+
+    @agent.output_validator
+    def _quotes_must_come_from_the_note(
+        judgment: SubmitRiskJudgment,
+    ) -> SubmitRiskJudgment:
+        # A quote the note does not contain is a fabricated citation; hand it back
+        # to the judge instead of letting it reach the capacity assumptions.
+        for match in judgment.risk_matches:
+            if match.matched_input_text not in operation_note:
+                raise ModelRetry(
+                    f"matched_input_text 必須逐字出現在營運備註中："
+                    f"{match.matched_input_text!r} 不在備註裡。"
+                )
+        return judgment
+
+    return agent
+
+
+def _run_judge(agent: Agent[None, Any], payload: str) -> SubmitRiskJudgment:
+    """Run one judge in its own thread.
+
+    `Agent.override` is contextvar-based, so the offline stand-in must be entered
+    inside the worker thread rather than around the whole fan-out.
+    """
+    override = (
+        agent.override(
+            model=FunctionModel(_mock_model_function, model_name="mock-judge")
+        )
+        if SETTINGS.agent.provider == "mock"
+        else nullcontext()
+    )
+    with override:
+        return agent.run_sync(payload).output
+
+
+def _judge_payload(operation_note: str, scenario_id: str) -> str:
     scenario = load_scenario(scenario_id)
     prompt_examples = load_prompt_examples()
-    payload = {
-        "risk_catalog": _catalog_for_prompt(),
-        "human_labeled_examples": {
-            "prompt_examples_version": prompt_examples["prompt_examples_version"],
-            "labeling_policy_version": prompt_examples["labeling_policy_version"],
-            "examples": prompt_examples["examples"],
+    return json.dumps(
+        {
+            "risk_catalog": _catalog_for_prompt(),
+            "human_labeled_examples": {
+                "prompt_examples_version": prompt_examples["prompt_examples_version"],
+                "labeling_policy_version": prompt_examples["labeling_policy_version"],
+                "examples": prompt_examples["examples"],
+            },
+            "structured_scenario": {
+                "scenario_id": scenario_id,
+                **scenario.model_dump(
+                    include={"scenario_version", "traffic", "capacity", "slo", "retry"}
+                ),
+            },
+            "target_operation_note": operation_note,
         },
-        "structured_scenario": {
-            "scenario_id": scenario_id,
-            "scenario_version": scenario.scenario_version,
-            "traffic": scenario.traffic.model_dump(),
-            "capacity": scenario.capacity.model_dump(),
-            "slo": scenario.slo.model_dump(),
-            "retry": scenario.retry.model_dump(),
-        },
-        "target_operation_note": operation_note,
-    }
-    response = OpenAI().responses.create(
-        model=model,
-        instructions=_judge_instructions(judge_id, perspective),
-        input=json.dumps(payload, ensure_ascii=False),
-        tools=cast(Any, [_judge_tool_schema()]),
-        tool_choice=cast(Any, {"type": "function", "name": "submit_risk_judgment"}),
-        parallel_tool_calls=False,
+        ensure_ascii=False,
     )
-    calls = [item for item in response.output if item.type == "function_call"]
-    if len(calls) != 1 or calls[0].name != "submit_risk_judgment":
-        raise RuntimeError(f"{judge_id} 未依規格提交風險判斷")
-    raw = json.loads(calls[0].arguments)
-    return _validate_judgment(raw, operation_note, judge_id), response
 
 
-def _llm_select(
-    operation_note: str, scenario_id: str
-) -> tuple[dict[str, Any], list[Any]]:
-    models = _judge_models()
-    with ThreadPoolExecutor(max_workers=len(JUDGE_ROLES)) as executor:
-        futures = [
-            executor.submit(
-                _llm_judge,
-                operation_note,
-                scenario_id,
-                judge_id,
-                perspective,
-                model,
-            )
-            for (judge_id, perspective), model in zip(JUDGE_ROLES, models, strict=True)
+def _llm_select(operation_note: str, scenario_id: str) -> JudgeConsensus:
+    payload = _judge_payload(operation_note, scenario_id)
+    agents = [
+        _judge_agent(judge_id, perspective, operation_note)
+        for judge_id, perspective in JUDGE_ROLES
+    ]
+    with ThreadPoolExecutor(max_workers=len(agents)) as executor:
+        outputs = [
+            future.result()
+            for future in [
+                executor.submit(_run_judge, agent, payload) for agent in agents
+            ]
         ]
-        results = [future.result() for future in futures]
-    judgments = [result[0] for result in results]
-    responses = [result[1] for result in results]
-    selection = _aggregate_judgments(judgments)
-    selection["models"] = models
-    selection["committee_mode"] = (
-        "same_model_multi_judge"
-        if len(set(models)) == 1
-        else "multi_model_openai_judges"
-    )
-    return selection, responses
+    judgments = [
+        JudgeVote(
+            judge_id=judge_id,
+            risk_matches=output.risk_matches,
+            no_confident_match=output.no_confident_match,
+        )
+        for (judge_id, _), output in zip(JUDGE_ROLES, outputs, strict=True)
+    ]
+    consensus = _aggregate_judgments(judgments)
+    consensus.model = SETTINGS.agent.openai_model
+    return consensus
 
 
 def run_agent_assessment(
@@ -412,48 +348,18 @@ def run_agent_assessment(
     operation_note: str,
     runs: int = 500,
     seed: int = 20260904,
-    allow_offline_fallback: bool = True,
-    run_profile: str = "custom",
 ) -> Assessment:
-    if not SETTINGS.agent.openai_api_key:
-        if not allow_offline_fallback:
-            raise RuntimeError("缺少 OPENAI_API_KEY，不能執行 LLM Agent")
-        selection = _offline_select(operation_note)
-        matches = _to_risk_matches(selection["risk_matches"])
-        return build_assessment(
-            scenario_id,
-            runs,
-            seed,
-            matches,
-            apply_risks=True,
-            run_profile=run_profile,
-        )
-
-    try:
-        selection, _judge_responses = _llm_select(operation_note, scenario_id)
-        matches = _to_risk_matches(selection["risk_matches"])
-        return build_assessment(
-            scenario_id,
-            runs,
-            seed,
-            matches,
-            apply_risks=True,
-            run_profile=run_profile,
-        )
-    except Exception:
-        if not allow_offline_fallback:
-            raise
-        logger.exception("LLM judge call failed; falling back to offline selection")
-        selection = _offline_select(operation_note)
-        matches = _to_risk_matches(selection["risk_matches"])
-        return build_assessment(
-            scenario_id,
-            runs,
-            seed,
-            matches,
-            apply_risks=True,
-            run_profile=run_profile,
-        )
+    if SETTINGS.agent.provider != "mock" and not SETTINGS.agent.openai_api_key:
+        raise RuntimeError("缺少 OPENAI_API_KEY；離線 demo 請設定 AGENT_PROVIDER=mock")
+    consensus = _llm_select(operation_note, scenario_id)
+    return build_assessment(
+        scenario_id,
+        runs,
+        seed,
+        consensus.selected_risks,
+        apply_risks=True,
+        requires_human_review=consensus.requires_human_review,
+    )
 
 
 def _macro_f1(expected: list[str], predicted: list[str]) -> float:
@@ -528,10 +434,10 @@ def evaluate_llm() -> dict[str, Any]:
     predicted_severities: list[str] = []
     details = []
     for case in cases:
-        selection, _ = _llm_select(case["operation_note"], "normal")
-        predicted = [item["risk_id"] for item in selection["risk_matches"]]
+        selection = _llm_select(case["operation_note"], "normal")
+        predicted = [item.risk_id for item in selection.risk_matches]
         predicted_by_id = {
-            item["risk_id"]: item["severity"] for item in selection["risk_matches"]
+            item.risk_id: item.severity for item in selection.risk_matches
         }
         expected = case["expected_risk_ids"]
         if expected:
@@ -543,14 +449,14 @@ def evaluate_llm() -> dict[str, Any]:
         else:
             no_match_total += 1
             no_match_false_positives += int(
-                bool(predicted) or not selection["no_confident_match"]
+                bool(predicted) or not selection.no_confident_match
             )
         details.append(
             {
                 **case,
                 "predicted_risk_ids": predicted,
                 "predicted_severities": predicted_by_id,
-                "raw_selection": selection,
+                "raw_selection": selection.model_dump(),
             }
         )
     matched_cases = sum(bool(case["expected_risk_ids"]) for case in cases)
@@ -575,7 +481,7 @@ def evaluate_llm() -> dict[str, Any]:
         for expected_label in SEVERITY_ORDER
     }
     return {
-        "models": _judge_models(),
+        "model": SETTINGS.agent.openai_model,
         "prompt_version": PROMPT_VERSION,
         "prompt_examples_version": prompt_examples["prompt_examples_version"],
         "prompt_example_count": len(prompt_examples["examples"]),

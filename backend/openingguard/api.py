@@ -49,19 +49,12 @@ def simulate(body: SimulationRequest) -> Assessment:
         operation_note = body.operation_note or scenario.operation_note
         runs = MONTE_CARLO_PROFILES[body.profile]
         if body.use_agent:
-            return run_agent_assessment(
-                body.scenario,
-                operation_note,
-                runs,
-                run_profile=body.profile,
-            )
-        return build_assessment(
-            body.scenario,
-            runs,
-            run_profile=body.profile,
-        )
+            return run_agent_assessment(body.scenario, operation_note, runs)
+        return build_assessment(body.scenario, runs)
     except (ValueError, ValidationError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/api/mock-orders")

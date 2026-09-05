@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 
 from .agent import evaluate_llm, run_agent_assessment
@@ -46,19 +45,18 @@ def _compact(result: Assessment | None) -> str:
     return "\n".join(lines)
 
 
-def _run(scenario_id: str, runs: int, use_agent: bool, run_profile: str) -> Assessment:
+def _run(scenario_id: str, runs: int, use_agent: bool) -> Assessment:
     scenario = load_scenario(scenario_id)
     if use_agent:
         return run_agent_assessment(
             scenario_id=scenario_id,
             operation_note=scenario.operation_note,
             runs=runs,
-            run_profile=run_profile,
         )
-    return build_assessment(scenario_id, runs=runs, run_profile=run_profile)
+    return build_assessment(scenario_id, runs=runs)
 
 
-def interactive(runs: int, run_profile: str) -> None:
+def interactive(runs: int) -> None:
     last: Assessment | None = None
     status = "選擇情境開始。"
     while True:
@@ -87,11 +85,11 @@ def interactive(runs: int, run_profile: str) -> None:
                     "3": "downstream_bottleneck",
                 }[choice]
                 status = f"正在執行 {scenario_id}..."
-                last = _run(scenario_id, runs, False, run_profile)
+                last = _run(scenario_id, runs, False)
                 status = "完成確定性模擬。"
             elif choice == "a":
                 status = "正在執行 Agent 與容量工具..."
-                last = _run("high_pressure", runs, True, run_profile)
+                last = _run("high_pressure", runs, True)
                 status = "Agent 流程完成。"
             elif choice == "e":
                 report = evaluate_llm()
@@ -122,7 +120,7 @@ def main() -> None:
         help="自訂 1-2,000 次；指定後覆蓋 profile",
     )
     parser.add_argument(
-        "--agent", action="store_true", help="使用 OpenAI Agent；無 key 時明確降級"
+        "--agent", action="store_true", help="使用 OpenAI Agent；無 key 時直接失敗"
     )
     parser.add_argument(
         "--eval", action="store_true", help="執行 15 筆 LLM gold-set 評測"
@@ -132,18 +130,17 @@ def main() -> None:
     runs = args.runs or MONTE_CARLO_PROFILES[args.profile]
     if not 1 <= runs <= 2_000:
         parser.error("runs 必須介於 1～2,000")
-    run_profile = "custom" if args.runs is not None else args.profile
     if args.eval:
         print(json.dumps(evaluate_llm(), ensure_ascii=False, indent=2))
         return
     if args.scenario:
-        result = _run(args.scenario, runs, args.agent, run_profile)
+        result = _run(args.scenario, runs, args.agent)
         if args.json:
             print(result.model_dump_json(indent=2))
         else:
             print(_compact(result))
         return
-    interactive(runs, run_profile)
+    interactive(runs)
 
 
 if __name__ == "__main__":

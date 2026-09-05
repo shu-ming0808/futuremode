@@ -7,7 +7,7 @@ versions) stay as module constants in core.py / agent.py.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -16,17 +16,13 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 class MockOrderSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MOCK_")
 
-    order_concurrency: int = Field(default=20, gt=0, alias="MOCK_ORDER_CONCURRENCY")
+    concurrency: int = Field(default=20, gt=0, alias="MOCK_ORDER_CONCURRENCY")
     validation_mean_ms: float = Field(default=10.0, gt=0)
     validation_sigma: float = Field(default=0.15, gt=0)
     database_mean_ms: float = Field(default=90.0, gt=0)
     database_sigma: float = Field(default=0.35, gt=0)
     gateway_mean_ms: float = Field(default=100.0, gt=0)
     gateway_sigma: float = Field(default=0.45, gt=0)
-
-    @property
-    def concurrency(self) -> int:
-        return self.order_concurrency
 
 
 class APISettings(BaseSettings):
@@ -50,14 +46,9 @@ class APISettings(BaseSettings):
 class AgentSettings(BaseSettings):
     openai_api_key: str | None = Field(default=None)
     openai_model: str = Field(default="gpt-5.1")
-    openai_judge_models: Annotated[list[str], NoDecode] = Field(default_factory=list)
-
-    @field_validator("openai_judge_models", mode="before")
-    @classmethod
-    def _split_comma_separated(cls, value: object) -> object:
-        if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
+    provider: Literal["openai", "mock"] = Field(
+        default="openai", alias="AGENT_PROVIDER"
+    )
 
 
 class Settings(BaseSettings):
