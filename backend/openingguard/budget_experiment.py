@@ -16,7 +16,7 @@ from typing import Callable
 import numpy as np
 
 
-CONFIG_PATH = Path(__file__).parent / "data" / "experiments" / "event_budget_v2.json"
+CONFIG_PATH = Path(__file__).parent / "data" / "experiments" / "event_budget_v3.json"
 STRATEGIES = ("fixed12", "scheduled", "reactive", "event", "perfect_timing")
 
 
@@ -209,6 +209,7 @@ def simulate(c: dict, truth: Truth, arrivals: np.ndarray, peak: np.ndarray,
         reason = "privileged_timing_reference_NOT_global_optimum"
     elif strategy == "event":
         start, target, reason = plan_event(c, decision)
+    active_target = target
     spare = c["budget_worker_minutes"] * 60 - base * horizon
     planned_start_tick = math.ceil(start / dt - 1e-9) if start is not None else None
     warm_ticks = round(c["warmup_seconds"] / dt)
@@ -242,6 +243,9 @@ def simulate(c: dict, truth: Truth, arrivals: np.ndarray, peak: np.ndarray,
     first_scale_down_tick = None
     base_restored_tick = None
     rebound_scale_up_count = 0
+    event_signal_applied = False
+    queue_fallback_trigger_count = 0
+    first_scale_trigger = "none"
     extra_paid_seconds = 0.0
     budget_exhausted = False
     load_window = deque()
@@ -285,7 +289,8 @@ def simulate(c: dict, truth: Truth, arrivals: np.ndarray, peak: np.ndarray,
                 and tick >= planned_start_tick
             )
             reactive_due = (
-                strategy == "reactive"
+                strategy in {"reactive", "event"}
+                and not planned_due
                 and stage == "base"
                 and tick % poll_ticks == 0
                 and queue_pressure
@@ -296,19 +301,45 @@ def simulate(c: dict, truth: Truth, arrivals: np.ndarray, peak: np.ndarray,
                 and is_controller_tick
                 and (queue_pressure or utilization_pressure)
             )
-            if (planned_due or reactive_due or rebound_due) and target > base:
+            requested_target = (
+                target if planned_due else c["burst_workers"]
+            )
+            if (planned_due or reactive_due or rebound_due) and requested_target > base:
                 if planned_due:
                     planned_triggered = True
                 if stage in {"base", "warm_pool"}:
-                    warming_from = base if stage == "base" else min(c["warm_pool_workers"], target)
+                    active_target = requested_target
+                    warming_from = (
+                        base
+                        if stage == "base"
+                        else min(c["warm_pool_workers"], active_target)
+                    )
                     stage = "warming"
                     warm_ready_tick = tick + warm_ticks
                     low_load_since_tick = None
+                    if planned_due and strategy == "event":
+                        event_signal_applied = True
+                    if reactive_due and strategy == "event":
+                        queue_fallback_trigger_count += 1
                     if activated_once:
                         rebound_scale_up_count += 1
                     else:
                         activated_once = True
                         first_scale_up_tick = tick
+                        if planned_due:
+                            first_scale_trigger = (
+                                "event_signal"
+                                if strategy == "event"
+                                else strategy
+                            )
+                        elif reactive_due:
+                            first_scale_trigger = (
+                                "queue_fallback"
+                                if strategy == "event"
+                                else "queue_reactive"
+                            )
+                        else:
+                            first_scale_trigger = "rebound"
 
             if stage == "burst" and is_controller_tick:
                 held_long_enough = (
@@ -316,8 +347,8 @@ def simulate(c: dict, truth: Truth, arrivals: np.ndarray, peak: np.ndarray,
                     and tick - burst_ready_tick >= min_high_ticks
                 )
                 if held_long_enough and low_load_confirmed:
-                    pool_target = min(c["warm_pool_workers"], target)
-                    if pool_target < target:
+                    pool_target = min(c["warm_pool_workers"], active_target)
+                    if pool_target < active_target:
                         stage = "warm_pool"
                         warm_pool_enter_tick = tick
                         if first_scale_down_tick is None:
@@ -338,13 +369,13 @@ def simulate(c: dict, truth: Truth, arrivals: np.ndarray, peak: np.ndarray,
             allocated = ready = c["fixed_workers"]
             controller_state = "fixed"
         elif stage == "warming":
-            allocated, ready = target, warming_from
+            allocated, ready = active_target, warming_from
             controller_state = "warming"
         elif stage == "burst":
-            allocated = ready = target
+            allocated = ready = active_target
             controller_state = "burst"
         elif stage == "warm_pool":
-            allocated = ready = min(c["warm_pool_workers"], target)
+            allocated = ready = min(c["warm_pool_workers"], active_target)
             controller_state = "warm_pool"
         else:
             allocated = ready = base
@@ -445,6 +476,9 @@ def simulate(c: dict, truth: Truth, arrivals: np.ndarray, peak: np.ndarray,
         "scale_down_first_step_seconds": first_scale_down_tick * dt if first_scale_down_tick is not None else None,
         "scale_down_base_seconds": base_restored_tick * dt if base_restored_tick is not None else None,
         "rebound_scale_up_count": rebound_scale_up_count,
+        "event_signal_applied": event_signal_applied,
+        "queue_fallback_trigger_count": queue_fallback_trigger_count,
+        "first_scale_trigger": first_scale_trigger,
         "budget_exhausted_warning": budget_exhausted,
         "scale_controller": "minimum-hold+hysteresis+warm-pool-v1" if strategy != "fixed12" else "fixed",
         "ready_lead_seconds": truth.peak_start - ready_at if truth.peak_start is not None and ready_at is not None else None,

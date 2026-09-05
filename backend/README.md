@@ -440,7 +440,9 @@ backend/
 
 新版研究 Notebook 比較五組策略：固定 12、固定時段、Queue 反應式、事件驅動，以及知道真實尖峰時間的參考組。共同限制為一小時最多 720 worker-minutes；動態策略平時使用 8 workers，需要時預熱至 24，需求下降後依控制器逐步縮回，不再為了用滿預算而固定維持 15 分鐘。30 秒 warmup 仍計費。
 
-事件資料和模擬真值完全分開。Agent 只看當時已有時間戳的公開資訊，只選 `risk_id + severity`；固定 JSON 政策決定容量。Notebook 收錄正常、正確早報、非固定時段、誤報、漏報、晚報、長尖峰與下游瓶頸，預設不執行大量模擬或付費 API。詳細限制見 [`docs/同預算事件實驗.md`](docs/同預算事件實驗.md)。
+事件資料和模擬真值完全分開。Agent 只看當時已有時間戳的公開資訊，只選 `risk_id + severity`；固定 JSON 政策決定容量。Event 策略採「Agent 訊號提前預熱＋Queue 反應式保底」，所以 Agent 漏報時仍可像一般 autoscaling 一樣在 Queue 達門檻後擴容。Notebook 收錄正常、正確早報、非固定時段、誤報、漏報、晚報、長尖峰與下游瓶頸，且不會自動呼叫付費 API。詳細限制見 [`docs/同預算事件實驗.md`](docs/同預算事件實驗.md)。
+
+Notebook 另外輸出 Agent 介入、介入後通過 SLO、介入但仍失敗，以及相對 reactive／scheduled 的「成功解救」次數。成功解救採配對定義：同一 case、同一 seed 下，Agent 訊號確實觸發預熱，Event 策略通過 SLO，而比較策略成為壞日。`fixture_NOT_LLM` 只驗證事件訊號進入容量政策的機制，不能當作 OpenAI 分類準確率。
 
 ### 動態縮容控制器
 
@@ -465,8 +467,9 @@ backend/
 - [x] 新增固定時段、反應式、事件驅動與 perfect-timing reference；同 case/seed 共用 arrival trace。
 - [x] 將公開事件輸入與未來 traffic truth 分離，並以測試阻止隱藏 RPS／真值進入 Agent payload。
 - [x] 新增正常、早報、非固定時段、誤報、漏報、晚報、長尖峰與下游瓶頸案例。
-- [x] 新增 `event_budget_analysis.ipynb`；大量模擬、敏感度與付費 LLM 預設關閉。
+- [x] 新增 `event_budget_analysis.ipynb`；主實驗、敏感度與付費 LLM 可由三個獨立開關控制。
 - [x] 新增 minimum hold、連續低負載確認、20-worker warm pool、hysteresis 與反彈重新預熱的動態縮容控制器。
+- [x] Event 策略新增 Queue 反應式保底，並在 Notebook 統計 Agent 介入與配對成功解救次數。
 - [x] Monte Carlo 上限擴充至 2,000，並提供 `demo=500`、`evidence=2,000` profile。
 - [x] 容量方案改用 `congestion_probability_ci95.upper < 5%` 判定，不再只看點估計。
 - [x] Agent 改為三個 OpenAI judge，輸出固定 `risk_id + severity`，不允許輸出倍率或容量數字。
@@ -477,7 +480,7 @@ backend/
 - [x] 校準器加入 quick／evidence profile、warm-up、30 秒量測、5 次重複、2 秒 drain-out 與 bootstrap mean 95% interval。
 - [x] 最大穩定 RPS 改為所有 repetitions 都需符合 99.9% within-SLO、錯誤率、P95 與 Queue 排空規則。
 - [x] 新增 Wilson 上界、Agent 多數決、uncertain→high 預覽與校準門檻的 regression tests。
-- [x] 完成 `uv sync --locked`、Python compile、19 項 regression tests 與 FastAPI smoke test。
+- [x] 完成 `uv sync --locked`、Python compile、20 項 regression tests 與 FastAPI smoke test。
 - [x] 使用 `seed=20260904, runs=500` 重跑統計 Notebook；13 個 code cells 全數成功且每個前面都有 Markdown 說明。
 - [x] 使用新版 quick profile 重跑本機 mock 校準，輸出明確標為探索性而非正式證據。
 
@@ -485,7 +488,7 @@ backend/
 
 | 項目 | 結果 |
 |---|---|
-| 靜態／政策測試 | compile 成功；`unittest` 19/19 通過 |
+| 靜態／政策測試 | compile 成功；`unittest` 20/20 通過 |
 | FastAPI | `/api/health` 與一般模擬回 200；無 key 的 Agent 請求回 503 |
 | 500-run 合成 high-pressure 情境 | fixed 83.6%、reactive 83.4%、predictive 0% 壅塞；predictive Wilson 95% 上界 0.76% |
 | 2,000-run 三策略效能基準 | 本機耗時 579.37 秒；適合離線證據，不適合 Demo 即時計算 |
@@ -496,7 +499,7 @@ backend/
 
 ## 未完成與已知限制
 
-- [ ] 新的同預算 Notebook 尚未執行 held-out 100-run 主實驗與敏感度掃描，因此目前不能宣稱事件策略優於固定 12 或定時策略。
+- [ ] `event-budget-v3-hybrid-agent-reactive` 已改用全新的 held-out seeds，但尚未重新執行 100-run 主實驗與敏感度掃描，因此目前不能用舊輸出宣稱新版 Event 策略優於 fixed12、scheduled 或 reactive。
 - [ ] `fixture_NOT_LLM` 只驗證事件進入政策的機制；尚未用有效 API key 測量真正 OpenAI Agent 的判斷品質、推論延遲與成本。
 - [ ] 已實作單次事件的動態縮容與反彈重新預熱；尚未支援同一小時多個獨立事件、跨事件冷卻政策及資料驅動參數最佳化。
 - [ ] 同預算主實驗刻意不含 retries；重試放大與 idempotency 應另做 ablation，不能混入主效果。

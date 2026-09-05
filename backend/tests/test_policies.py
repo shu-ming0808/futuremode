@@ -349,6 +349,29 @@ class EqualBudgetExperimentTests(unittest.TestCase):
         )
         self.assertLess(result["worker_minutes"], config["budget_worker_minutes"])
         self.assertFalse(result["budget_exhausted_warning"])
+        self.assertTrue(result["event_signal_applied"])
+        self.assertEqual(result["first_scale_trigger"], "event_signal")
+        self.assertEqual(result["queue_fallback_trigger_count"], 0)
+
+    def test_event_strategy_uses_queue_fallback_when_signal_is_missing(self) -> None:
+        config = load_config()
+        truth, decision = {
+            truth.case_id: (truth, decision)
+            for truth, decision in make_cases(config)
+        }["missed_signal"]
+        self.assertIsNone(decision)
+        arrivals, peak = generate_truth(config, truth, 2026091500)
+
+        event = simulate(config, truth, arrivals, peak, "event", None)
+        reactive = simulate(config, truth, arrivals, peak, "reactive")
+
+        self.assertEqual(event["first_scale_trigger"], "queue_fallback")
+        self.assertGreaterEqual(event["queue_fallback_trigger_count"], 1)
+        self.assertFalse(event["event_signal_applied"])
+        self.assertEqual(
+            event["accepted_within_slo"], reactive["accepted_within_slo"]
+        )
+        self.assertEqual(event["worker_minutes"], reactive["worker_minutes"])
 
     def test_rebound_uses_warm_pool_while_extra_workers_warm_up(self) -> None:
         config = load_config()
