@@ -1,5 +1,5 @@
 {
-  "version": "event-budget-v2-adaptive-scale-down",
+  "version": "event-budget-v3-hybrid-agent-reactive",
   "synthetic_assumption": true,
   "horizon_seconds": 3600,
   "dt_seconds": 0.1,
@@ -42,7 +42,7 @@
     "cold_start_autoscaling_delay"
   ],
   "tuning_seeds": [101, 102, 103, 104, 105],
-  "evaluation_seed_start": 2026090500,
+  "evaluation_seed_start": 2026091500,
   "evaluation_runs": 100,
   "sensitivity_peak_rps": [1100, 1500, 1900],
   "sensitivity_peak_durations": [300, 720, 1200],
