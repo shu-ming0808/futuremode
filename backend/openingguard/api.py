@@ -42,7 +42,7 @@ def health() -> dict[str, Any]:
     }
 
 
-@app.post("/api/simulate")
+@app.post("/api/assessments")
 def simulate(body: SimulationRequest) -> Assessment:
     try:
         scenario = load_scenario(body.scenario)

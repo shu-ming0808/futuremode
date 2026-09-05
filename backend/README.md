@@ -259,7 +259,7 @@ uv run fastapi dev main.py
 
 開發伺服器預設為 `http://127.0.0.1:8000`，互動文件為 `http://127.0.0.1:8000/docs`。
 
-本專案採同一台電腦串接。呼叫端使用 `POST http://127.0.0.1:8000/api/simulate`；CORS 預設只允許本機的 3000 與 5173 port，可用 `CORS_ORIGINS` 環境變數覆寫。
+本專案採同一台電腦串接。呼叫端使用 `POST http://127.0.0.1:8000/api/assessments`；CORS 預設只允許本機的 3000 與 5173 port，可用 `CORS_ORIGINS` 環境變數覆寫。
 
 ### 3. 執行單一 CLI 情境
 
@@ -349,7 +349,7 @@ Mock pipeline 只包含三個合成階段：request validation、Database delay�
 
 回傳版本、可用情境及是否存在 OpenAI API key；不會回傳 key 本身。
 
-### `POST /api/simulate`
+### `POST /api/assessments`
 
 請求格式：
 
@@ -358,55 +358,43 @@ Mock pipeline 只包含三個合成階段：request validation、Database delay�
   "scenario": "high_pressure",
   "profile": "demo",
   "operation_note": "今晚部署新版下單服務，夜盤量能偏高，明早可能大量送單",
-  "use_agent": true,
-  "seed": 20260904
+  "use_agent": true
 }
 ```
 
 | 欄位 | 型別 | 限制 | 說明 |
 |---|---|---|---|
 | `scenario` | string | 必須是既有情境 ID | 預設 `normal` |
-| `profile` | `demo` or `evidence` | 固定列舉 | 預設 `demo`；分別代表 500 與 2,000 次 Monte Carlo |
-| `runs` | integer or null | 1～2,000 | 選填；只供明確的自訂測試，指定後覆蓋 profile |
+| `profile` | `demo` or `evidence` | 固定列舉 | 預設 `demo`；分別代表 500 與 2,000 次 Monte Carlo，只影響統計精度，不影響回應結構 |
 | `operation_note` | string or null | 選填 | Agent 使用的營運備註；空值使用情境預設文字 |
 | `use_agent` | boolean | — | 是否執行風險選擇流程 |
-| `seed` | integer | — | 固定亂數種子 |
 
-主要回傳欄位：
+回傳只包含前端要顯示的評估結論，不包含 Monte Carlo 內部過程（seed、跑幾次、單次模擬中間值）或除錯用審計欄位：
 
 | 欄位 | 說明 |
 |---|---|
-| `run_id` | 本次執行 UUID |
-| `scenario_version` | 本次使用的固定情境參數版本 |
-| `simulator_version` | 本次使用的模擬器版本 |
-| `derived_parameters` | 公式與推導出的單台 worker 有效 RPS |
-| `synthetic_assumption` | 固定為 true，提醒數據是合成假設 |
-| `risk_matches` | Agent 選出的 `risk_id`、`severity`、投票、原文證據與可信目錄來源 |
-| `applied_risk_assumptions` | 實際套用的固定倍率；uncertain 會明列使用 high 預覽 |
-| `scenarios` | 三種策略的效能、風險與成本 |
-| `recommended` | 最低成本安全預熱方案；無安全方案時為 null |
-| `candidate_plans` | 所有 candidate worker 的評估結果 |
-| `warning` | worker-only 無解時的限制說明 |
-| `approval_status` | 一般為 `pending_human_approval`；無共識時為 `requires_human_review_uncertain_agent` |
-| `requires_human_review`／`auto_approved` | 一律要求人工核准且永不自動核准 |
-| `formal_pass_rule` | 明列以 Wilson 95% CI 上界判斷 5% 壅塞門檻 |
-| `agent` | judge 模式、模型、三份 tool output、彙整狀態與是否為真正 LLM 結果 |
+| `label` | 情境顯示名稱 |
+| `scenarios` | 三種策略的跨次模擬統計聚合（壅塞機率＋95% CI、p95 延遲、逾時率、DB／閘道峰值使用率、成本），供比較圖表使用 |
+| `recommended` | 最低成本安全預熱方案；無安全方案時為 `null` |
+| `warning_code` | 目前只有 `no_feasible_plan`；對應顯示文案見 `openingguard/data/frontend_copy.json`，由前端維護 |
+| `risks` | 合併後的風險卡片：`risk_id`、`title`、`severity`、judge 引用的原文、目錄來源、套用到模擬的實際倍率（`effects`） |
+| `requires_human_review` | 是否需要人工核准（風險判斷不確定，或原本就一律要求人工核准） |
+
+Agent 判斷細節（三個 judge 各自投票、模型名稱、tool-call response id 等）與 Monte Carlo 候選方案全量掃描不對外回傳，因為前端畫面不需要分辨判斷來源或展示掃描過程；如需除錯，改讀後端 log。
 
 目前 API 刻意不接受呼叫端自行傳入 RPS、倍率、P50/P90/P99、market features 或 confidence。呼叫端只能透過 `scenario` 選擇既有情境；Agent 只能選擇既有 `risk_id` 與列舉的 `severity`，不能創造情境數值。若未來開放自訂參數，必須使用另一個受嚴格驗證的管理流程，不交由 LLM 直接填值。
 
 ### `POST /api/mock-orders`
 
-本機校準專用的假下單端點。它驗證 UUID、帳號、商品、買賣方向及數量，再模擬 Database 與交易閘道延遲，最後只回傳 `status: accepted` 與各階段時間；不會送出真實委託。
+本機校準專用的假下單端點，只模擬 Database 與交易閘道延遲，回傳 `status: accepted` 與各階段時間；不會送出真實委託。
 
 ```json
 {
-  "order_id": "00000000-0000-0000-0000-000000000001",
-  "account_id": "DEMO-ACCOUNT",
-  "symbol": "2330",
-  "side": "buy",
-  "quantity": 1
+  "order_id": "00000000-0000-0000-0000-000000000001"
 }
 ```
+
+`order_id` 選填；未提供時後端會自動產生一組。帳號、商品、買賣方向、數量等欄位未參與任何運算，故不接受。
 
 ## 統計 Notebook 流程
 
