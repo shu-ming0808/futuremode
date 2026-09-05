@@ -1,0 +1,7 @@
+{
+    "python.analysis.typeCheckingMode": "standard",
+    "python.analysis.diagnosticMode": "workspace",
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/backend"
+    ]
+}

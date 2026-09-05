@@ -204,7 +204,7 @@ gateway peak utilization < 95%
 
 1. 後端依 `scenario_id` 載入版本化的固定結構化參數，呼叫端只提供情境 ID 與自然語言營運備註。
 2. 三個 judge 共用 `prompt_examples.json` 中 12 筆經確認的人工標記 few-shot 範例與同一套 severity rubric。
-3. 三個 judge 分別採市場事件、系統容量與風險稽核視角；預設可共用同一個 OpenAI model，也可透過 `OPENAI_JUDGE_MODELS` 指定三個可用的 OpenAI model。
+3. 三個 judge 分別採市場事件、系統容量與風險稽核視角，共用 `OPENAI_MODEL` 指定的同一個 model。
 4. 每個 judge 只能從 `risk_catalog.json` 選擇最多三個既有 `risk_id`。
 5. 嚴重度不是任意分數，而是兩個有序的 0/1 判斷：`is_at_least_medium` 與 `is_high`；`is_high=1` 時前者必須為 1。
 6. `matched_input_text` 必須逐字出現在待判斷的營運備註中，不能複製 few-shot 範例的文字。
@@ -231,16 +231,7 @@ gateway peak utilization < 95%
 
 實際 rubric prompt 存放在 `openingguard.agent._judge_instructions`，版本為 `openingguard-agent-v3-few-shot`。固定 prompt 與 examples 放在請求前段，待判斷的 `target_operation_note` 放在最後；strict function schema 仍透過 Responses API 的 `tools` 欄位傳入，不靠文字解析 JSON。
 
-若沒有 `OPENAI_API_KEY`，程式會改用簡單關鍵字備援，並明確標示：
-
-```json
-{
-  "mode": "offline_fallback",
-  "is_llm_result": false
-}
-```
-
-離線備援不能當成 LLM Demo 或 Agent 準確率證據。
+沒有 `OPENAI_API_KEY` 時，Agent 路徑直接失敗（CLI 顯示錯誤，`/api/assessments` 回 503），不會用關鍵字結果冒充 LLM 判斷。需要離線 demo 時設定 `AGENT_PROVIDER=mock`：三個 judge 改由確定性關鍵字 stub 回覆，但仍走完整的 tool schema、驗證與多數決流程。mock 結果不能當成 Agent 準確率證據。
 
 ## 快速開始
 
@@ -289,13 +280,7 @@ $env:OPENAI_MODEL="gpt-5.1"
 uv run openingguard --scenario high_pressure --profile demo --agent
 ```
 
-預設三個 judge 都使用 `OPENAI_MODEL`。若 OpenAI project 有權限使用三個指定 model，可選擇設定：
-
-```powershell
-$env:OPENAI_JUDGE_MODELS="model-a,model-b,model-c"
-```
-
-同一組 OpenAI API key 即可發出三個請求；模型是否可用仍取決於 OpenAI project 權限。三個 judge 會平行呼叫以降低等待時間。
+三個 judge 都使用 `OPENAI_MODEL`，差異只在視角 prompt。同一組 OpenAI API key 即可發出三個平行請求以降低等待時間。
 
 ### 6. 執行 15 筆人工標記的 Agent 評測
 
@@ -303,7 +288,7 @@ $env:OPENAI_JUDGE_MODELS="model-a,model-b,model-c"
 uv run openingguard --eval
 ```
 
-沒有 API key 時，此命令會拒絕執行，避免把離線關鍵字備援誤報為 LLM 評測。
+沒有 API key 時，此命令會拒絕執行，避免把 mock 結果誤報為 LLM 評測。
 
 ### 7. 開啟統計 Notebook
 
@@ -433,6 +418,8 @@ backend/
 │   └── latest.json                    # 新版 quick profile 的探索性 mock 校準結果
 ├── tests/
 │   └── test_policies.py               # 新決策規則的 regression tests
+├── tools/
+│   └── calibrate.py                   # concurrency 與 RPS 校準器（不在 demo 請求路徑上）
 │
 └── openingguard/
     ├── __init__.py                   # 套件版本
@@ -441,7 +428,6 @@ backend/
     ├── cli.py                        # CLI 與互動式 Demo
     ├── agent.py                      # Responses API tool calling 與評測
     ├── mock_order.py                 # 三階段 mock 下單服務
-    ├── calibrate.py                  # concurrency 與 RPS 校準器
     ├── core.py                       # 流量、Queue、策略與容量搜尋核心
     └── data/
         ├── risk_catalog.json         # 10 種固定風險與倍率
@@ -474,7 +460,7 @@ backend/
 | 項目 | 結果 |
 |---|---|
 | 靜態／政策測試 | compile 成功；`unittest` 9/9 通過 |
-| FastAPI | `/api/health`、一般模擬、無 key 的離線 Agent 路徑皆回 200 |
+| FastAPI | `/api/health` 與一般模擬回 200；無 key 的 Agent 請求回 503 |
 | 500-run 合成 high-pressure 情境 | fixed 83.6%、reactive 83.4%、predictive 0% 壅塞；predictive Wilson 95% 上界 0.76% |
 | 2,000-run 三策略效能基準 | 本機耗時 579.37 秒；適合離線證據，不適合 Demo 即時計算 |
 | quick mock 校準 | 探索性最大穩定 target RPS 120；160 RPS 時 P95 約 2031 ms、SLO 內接受率約 90.6%，且 2 秒內未排空 |
