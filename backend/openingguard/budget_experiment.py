@@ -141,7 +141,7 @@ def openai_decision(c: dict, event: PublicEvent) -> Decision:
         decided_at=event.available_at + measured_judgment_seconds,
         risk_id=chosen.risk_id if chosen else None,
         severity=chosen.severity if chosen else "no_match",
-        source="openai_three_judges_public_event",
+        source="openai_single_judgment_public_event",
     )
 
 

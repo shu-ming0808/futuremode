@@ -1,7 +1,7 @@
 """Environment-driven deployment configuration.
 
 Only values that vary between environments belong here. Code-level constants
-that define simulation semantics (Monte Carlo profiles, judge roles, prompt
+that define simulation semantics (Monte Carlo profiles, Agent prompt
 versions) stay as module constants in core.py / agent.py.
 """
 

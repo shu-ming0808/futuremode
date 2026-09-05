@@ -90,7 +90,7 @@ class RiskEffects(BaseModel):
 
 
 class RiskCard(BaseModel):
-    """Judge-selected risk merged with its catalog metadata and applied simulation effects."""
+    """Agent-selected risk merged with catalog metadata and simulation effects."""
 
     risk_id: str
     title: str
@@ -101,7 +101,7 @@ class RiskCard(BaseModel):
 
 
 class SubmitRiskJudgmentMatch(BaseModel):
-    """Mirrors the judge tool-call schema; risk_id enum is narrowed dynamically per call."""
+    """One risk in the strict Agent tool call; risk_id is narrowed per request."""
 
     risk_id: str
     is_at_least_medium: Literal[0, 1]
@@ -128,49 +128,42 @@ class SubmitRiskJudgmentMatch(BaseModel):
 
 class SubmitRiskJudgment(BaseModel):
     risk_matches: list[SubmitRiskJudgmentMatch] = Field(max_length=3)
+    decision_status: Literal["confirmed", "uncertain", "no_match"]
     no_confident_match: bool
 
     model_config = {"extra": "forbid"}
 
     @model_validator(mode="after")
     def _derive_no_confident_match(self) -> SubmitRiskJudgment:
-        # Field stays in the tool-call schema so the judge must state it, but the
-        # value is derived rather than trusted (judges have gotten it wrong before).
-        self.no_confident_match = not self.risk_matches
+        if self.decision_status == "no_match" and self.risk_matches:
+            raise ValueError("decision_status=no_match 時 risk_matches 必須為空")
+        if self.decision_status != "no_match" and not self.risk_matches:
+            raise ValueError(
+                "decision_status=confirmed 或 uncertain 時必須提供候選 risk_matches"
+            )
+        # Field stays in the strict tool schema, but is derived rather than trusted.
+        self.no_confident_match = self.decision_status != "confirmed"
         return self
 
 
-class JudgeVote(BaseModel):
-    """One judge's validated output, tagged with which judge produced it."""
-
-    judge_id: str
-    risk_matches: list[SubmitRiskJudgmentMatch]
-    no_confident_match: bool
-
-
-class AggregatedRiskMatch(BaseModel):
-    """One risk after cross-judge voting; `severity` is uncertain unless judges agree."""
+class AgentRiskMatch(BaseModel):
+    """One validated risk selected by the single OpenAI judgment."""
 
     risk_id: str
     severity: Literal["low", "medium", "high", "uncertain"]
     simulation_assumption: Literal["low", "medium", "high"]
-    selected_by_judges: int
-    judge_count: int
-    severity_votes: dict[str, int]
-    binary_vote_sums: dict[str, int]
     matched_input_text: str
-    evidence_quotes: list[str]
     reason: str
 
 
-class JudgeConsensus(BaseModel):
-    risk_matches: list[AggregatedRiskMatch]
+class AgentDecision(BaseModel):
+    """Auditable decision built from one strict OpenAI tool call."""
+
+    risk_matches: list[AgentRiskMatch]
     no_confident_match: bool
     decision_status: Literal["confirmed", "uncertain", "no_match"]
     requires_human_review: bool
-    auto_approved: bool = False
-    judge_count: int
-    judgments: list[JudgeVote]
+    raw_judgment: SubmitRiskJudgment
     model: str = ""
 
     @property

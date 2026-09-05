@@ -2,7 +2,7 @@
 
 ## 專案目的
 
-OpeningGuard AI 是券商內部使用的開盤容量決策 Demo。系統以合成下單請求建立 Monte Carlo 排隊模擬，比較固定容量、反應式 autoscaling 與預測式預熱，並由三個 OpenAI judge 從固定風險目錄選擇 `risk_id` 與容量影響 `severity`，再交由確定性的容量評估工具計算。
+OpeningGuard AI 是券商內部使用的開盤容量決策 Demo。系統以合成下單請求建立 Monte Carlo 排隊模擬，比較固定容量、反應式 autoscaling 與預測式預熱，並以人工標註 few-shot 範例引導單次 OpenAI Agent 從固定風險目錄選擇 `risk_id` 與容量影響 `severity`，再交由確定性的容量評估工具計算。
 
 本專案回答兩個問題：
 
@@ -33,7 +33,7 @@ flowchart TD
 | 套件管理 | `uv`、`pyproject.toml`、`uv.lock` | 建立可重現環境與鎖定依賴 |
 | API | FastAPI | 提供 health check 與容量模擬端點 |
 | 數值計算 | NumPy | 合成流量與 Monte Carlo 統計 |
-| Agent | OpenAI Responses API function calling | 三個 judge 從固定目錄選擇風險與容量影響程度 |
+| Agent | OpenAI Responses API strict function calling | 參考人工標註範例，單次判斷風險與容量影響程度 |
 | Schema | Pydantic | 驗證 API 輸入 |
 | 統計分析 | pandas、Matplotlib、Seaborn、JupyterLab | 產生表格、信賴區間與敏感度圖 |
 | 儲存 | JSON 與記憶體 | MVP 情境、風險目錄及執行結果；目前無正式 Database |
@@ -142,7 +142,7 @@ $$
 | `retry_amplification_factor` | 全部 attempts／原始請求 |
 | `total_worker_minutes` | 模擬期間 worker 數對時間的積分，作為相對成本 |
 
-`severity` 只代表事件對系統容量的影響程度，不是事件發生機率。三位 judge 的票數只代表判斷共識，也不能視為三個獨立統計樣本；`congestion_probability` 才是模擬產生的壅塞機率估計。
+`severity` 只代表事件對系統容量的影響程度，不是事件發生機率；`congestion_probability` 才是模擬產生的壅塞機率估計。單次 Agent 輸出是分類結果，不是統計樣本或機率估計。
 
 ## 三個固定 Demo 情境
 
@@ -191,16 +191,16 @@ gateway peak utilization < 95%
 ## OpenAI Agent 決策流程
 
 1. 後端依 `scenario_id` 載入版本化的固定結構化參數，呼叫端只提供情境 ID 與自然語言營運備註。
-2. 三個 judge 共用 `prompt_examples.json` 中 12 筆經確認的人工標記 few-shot 範例與同一套 severity rubric。
-3. 三個 judge 分別採市場事件、系統容量與風險稽核視角，共用 `OPENAI_MODEL` 指定的同一個 model。
-4. 每個 judge 只能從 `risk_catalog.json` 選擇最多三個既有 `risk_id`。
+2. Prompt 載入 `prompt_examples.json` 中 12 筆經確認的人工標註 few-shot 範例與固定 severity rubric。
+3. 後端只呼叫一次 `OPENAI_MODEL` 指定的模型，不再進行三次判斷或多數決。
+4. Agent 只能從 `risk_catalog.json` 選擇最多三個既有 `risk_id`。
 5. 嚴重度不是任意分數，而是兩個有序的 0/1 判斷：`is_at_least_medium` 與 `is_high`；`is_high=1` 時前者必須為 1。
 6. `matched_input_text` 必須逐字出現在待判斷的營運備註中，不能複製 few-shot 範例的文字。
-7. 每個 judge 必須呼叫 strict function tool `submit_risk_judgment`；模型不得輸出倍率、RPS 或 worker 數。
-8. Python 彙整三票並從可信目錄補上來源 URL，再依 `risk_id + severity` 套用固定倍率。
-9. 多數票決定 `low`、`medium` 或 `high`。沒有多數共識時保留 `severity=uncertain`，但以固定的 `high` 參數產生最壞情境預覽。
-10. 有明確多數共識的結果直接產生容量建議，不額外要求人工核准。
-11. `uncertain` 才回傳 `requires_human_review=true`，並只呈現 high 最壞情境預覽。
+7. Agent 必須且只能呼叫 strict function tool `submit_risk_judgment`；模型不得輸出倍率、RPS 或 worker 數。
+8. Agent 同時回傳 `decision_status=confirmed|uncertain|no_match`；Python 驗證 schema 與原文引用，再從可信目錄補上來源 URL。
+9. `confirmed` 保留 Agent 判斷的 `low`、`medium` 或 `high`，並依 `risk_id + severity` 套用固定倍率。
+10. `uncertain` 表示能辨識候選風險但無法可靠分級；輸出保留 uncertain，模擬暫用既有 high 參數作最壞情境預覽。
+11. 只有 `uncertain` 回傳 `requires_human_review=true`；`no_match` 不套用風險倍率。
 
 ### 風險嚴重度與固定倍率
 
@@ -211,15 +211,15 @@ gateway peak utilization < 95%
 | `low` | 影響有限 | 使用目錄中的 low 參數 |
 | `medium` | 可能明顯增加 Queue 或資源使用 | 使用 medium 參數 |
 | `high` | 可能造成逾時、下游飽和或違反 SLO | 使用 high 參數 |
-| `uncertain` | judge 無法形成多數共識 | Agent 結果保持 uncertain；模擬暫用 high，要求人工覆核 |
+| `uncertain` | Agent 能辨識候選風險，但無法可靠分級 | Agent 結果保持 uncertain；模擬暫用 high，要求人工覆核 |
 
 `risk_catalog.json` 已為每個 `risk_id` 保存 low／medium／high 的固定 `simulation_assumptions`。倍率由 Git 版本化 JSON 決定，Agent 不能自行創造或修改數值。
 
-同一模型的三個 judge 具有相關性，因此不能把 3 票當作 3 個獨立隨機樣本。資料嚴格分成兩份：12 筆 `prompt_examples.json` 只用於 few-shot 示範；15 筆 `eval_cases.json` 是不送進 prompt 的 held-out 測試集。程式會拒絕兩份資料中出現相同營運備註。評測除 Top-1、Top-3 與 no-match false-positive 外，也輸出 severity confusion matrix、accuracy、macro-F1、coverage 與 covered cases 的 quadratic weighted kappa。
+資料嚴格分成兩份：12 筆 `prompt_examples.json` 只用於人工標註 few-shot 示範；15 筆 `eval_cases.json` 是不送進 prompt 的 held-out 測試集。程式會拒絕兩份資料中出現相同營運備註。評測除 Top-1、Top-3 與 no-match false-positive 外，也輸出 severity confusion matrix、accuracy、macro-F1、coverage 與 covered cases 的 quadratic weighted kappa。模型品質必須依 held-out 結果判斷，不能把一次輸出當成準確率證據。
 
-實際 rubric prompt 存放在 `openingguard.agent._judge_instructions`，版本為 `openingguard-agent-v3-few-shot`。固定 prompt 與 examples 放在請求前段，待判斷的 `target_operation_note` 放在最後；strict function schema 仍透過 Responses API 的 `tools` 欄位傳入，不靠文字解析 JSON。
+實際 rubric prompt 存放在 `openingguard/prompts/agent_instructions.txt`，版本為 `openingguard-agent-v4-single-judgment`。固定 prompt 與 examples 放在請求前段，待判斷的 `target_operation_note` 放在最後；strict function schema 仍透過 Responses API 的 `tools` 欄位傳入，不靠文字解析 JSON。
 
-沒有 `OPENAI_API_KEY` 時，Agent 路徑直接失敗（CLI 顯示錯誤，`/api/assessments` 回 503），不會用關鍵字結果冒充 LLM 判斷。需要離線 demo 時設定 `AGENT_PROVIDER=mock`：三個 judge 改由確定性關鍵字 stub 回覆，但仍走完整的 tool schema、驗證與多數決流程。mock 結果不能當成 Agent 準確率證據。
+沒有 `OPENAI_API_KEY` 時，Agent 路徑直接失敗（CLI 顯示錯誤，`/api/assessments` 回 503），不會自動降級。需要離線測試時可明確設定 `AGENT_PROVIDER=mock`，由確定性關鍵字 stub 回覆並通過相同 schema；mock 結果不能當成 Agent 準確率證據。
 
 ### 真實事故人工標註候選
 
@@ -274,7 +274,7 @@ $env:OPENAI_MODEL="gpt-5.1"
 uv run openingguard --scenario high_pressure --profile demo --agent
 ```
 
-三個 judge 都使用 `OPENAI_MODEL`，差異只在視角 prompt。同一組 OpenAI API key 即可發出三個平行請求以降低等待時間。
+每次評估只呼叫一次 `OPENAI_MODEL`，人工標註範例、風險目錄、情境與待判斷備註會一起送入該次 strict tool-call。
 
 ### 6. 執行 15 筆人工標記的 Agent 評測
 
@@ -356,10 +356,10 @@ Mock pipeline 只包含三個合成階段：request validation、Database delay�
 | `scenarios` | 三種策略的跨次模擬統計聚合（壅塞機率＋95% CI、p95 延遲、逾時率、DB／閘道峰值使用率、成本），供比較圖表使用 |
 | `recommended` | 最低成本安全預熱方案；無安全方案時為 `null` |
 | `warning_code` | 目前只有 `no_feasible_plan`；對應顯示文案見 `openingguard/data/frontend_copy.json`，由前端維護 |
-| `risks` | 合併後的風險卡片：`risk_id`、`title`、`severity`、judge 引用的原文、目錄來源、套用到模擬的實際倍率（`effects`） |
-| `requires_human_review` | judge 無法形成明確共識時為 `true`；confirmed 結果為 `false` |
+| `risks` | 合併後的風險卡片：`risk_id`、`title`、`severity`、Agent 引用的原文、目錄來源、套用到模擬的實際倍率（`effects`） |
+| `requires_human_review` | 單次 Agent 回傳 uncertain 時為 `true`；confirmed 或 no_match 為 `false` |
 
-Agent 判斷細節（三個 judge 各自投票、模型名稱、執行來源與 tool-call response id 等）和 Monte Carlo 候選方案全量掃描不對外回傳；如需除錯，改讀後端 log。
+Agent 的內部判斷細節（理由、模型名稱與 tool-call response id 等）和 Monte Carlo 候選方案全量掃描不對外回傳；如需除錯，改讀後端 log。
 
 目前 API 刻意不接受呼叫端自行傳入 RPS、倍率、P50/P90/P99、market features 或 confidence。呼叫端只能透過 `scenario` 選擇既有情境；Agent 只能選擇既有 `risk_id` 與列舉的 `severity`，不能創造情境數值。若未來開放自訂參數，必須使用另一個受嚴格驗證的管理流程，不交由 LLM 直接填值。
 
@@ -472,14 +472,14 @@ Notebook 另外輸出 Agent 介入、介入後通過 SLO、介入但仍失敗，
 - [x] Event 策略新增 Queue 反應式保底，並在 Notebook 統計 Agent 介入與配對成功解救次數。
 - [x] Monte Carlo 上限擴充至 2,000，並提供 `demo=500`、`evidence=2,000` profile。
 - [x] 容量方案改用 `congestion_probability_ci95.upper < 5%` 判定，不再只看點估計。
-- [x] Agent 改為三個 OpenAI judge，輸出固定 `risk_id + severity`，不允許輸出倍率或容量數字。
+- [x] Agent 改為人工標註 few-shot 加單次 OpenAI strict 判斷，輸出固定 `risk_id + severity`，不允許輸出倍率或容量數字。
 - [x] 嚴重度使用兩個有序 0/1 欄位，並由 Python 驗證 `high` 必須同時滿足 `at_least_medium`。
-- [x] 無多數共識時保留 `uncertain`，模擬採固定 high 參數做最壞情境預覽，禁止自動核准。
+- [x] 單次判斷為 `uncertain` 時保留 uncertain，模擬採固定 high 參數做最壞情境預覽並要求人工覆核。
 - [x] Agent 人工案例補上 severity 標記與 accuracy、macro-F1、coverage、quadratic weighted kappa 輸出。
 - [x] Agent 加入獨立版本化的人工標記 few-shot examples，並禁止與 held-out eval cases 重疊。
 - [x] 校準器加入 quick／evidence profile、warm-up、30 秒量測、5 次重複、2 秒 drain-out 與 bootstrap mean 95% interval。
 - [x] 最大穩定 RPS 改為所有 repetitions 都需符合 99.9% within-SLO、錯誤率、P95 與 Queue 排空規則。
-- [x] 新增 Wilson 上界、Agent 多數決、uncertain→high 預覽與校準門檻的 regression tests。
+- [x] 新增 Wilson 上界、Agent 單次判斷狀態、uncertain→high 預覽與校準門檻的 regression tests。
 - [x] 完成 `uv sync --locked`、Python compile、20 項 regression tests 與 FastAPI smoke test。
 - [x] 使用 `seed=20260904, runs=500` 重跑統計 Notebook；13 個 code cells 全數成功且每個前面都有 Markdown 說明。
 - [x] 使用新版 quick profile 重跑本機 mock 校準，輸出明確標為探索性而非正式證據。
@@ -504,8 +504,7 @@ Notebook 另外輸出 Agent 介入、介入後通過 SLO、介入但仍失敗，
 - [ ] 已實作單次事件的動態縮容與反彈重新預熱；尚未支援同一小時多個獨立事件、跨事件冷卻政策及資料驅動參數最佳化。
 - [ ] 同預算主實驗刻意不含 retries；重試放大與 idempotency 應另做 ablation，不能混入主效果。
 - [ ] 歷史事故資料仍是回顧式案例，尚無帶「訊號可取得時間、尖峰開始時間」的前瞻資料，因此不能證明真實世界提前預警能力。
-- [ ] 使用有效 API key 執行三個 OpenAI judge 與 15 筆人工案例評測。模型權限、實際延遲、token 成本、macro-F1 與 kappa 目前未知。
-- [ ] 同模型三個 judge 的輸出具有相關性，票數只是共識而非三個獨立統計樣本；需在報告中避免錯誤的獨立性宣稱。
+- [ ] 使用有效 API key 執行單次 OpenAI 判斷與 15 筆人工案例評測。模型權限、實際延遲、token 成本、macro-F1 與 kappa 目前未知。
 - [ ] 14 筆真實事故已完成使用者核准的第一版單人標註，但尚未切分成 few-shot 與 held-out；切分前不得併入 prompt 或用來宣稱模型準確率。
 - [ ] 第一版不要求第二位標註者，因此目前不能報告人工標註者間一致性；若未來要把資料升級為論文級 gold labels，再補獨立覆核與裁決。
 - [ ] 執行正式 evidence 校準；目前只有 quick 結果。正式流程需依序測量多組 concurrency 與 RPS，每組 30 秒且重複 5 次，估計需數十分鐘。
@@ -520,7 +519,7 @@ Notebook 另外輸出 Agent 介入、介入後通過 SLO、介入但仍失敗，
 - [ ] 實作持久化 idempotency key、委託狀態機與「已接受但未成交」語意；目前不接真實 DB。
 - [ ] 串接公開新聞與市場行情，保留資料時間戳、來源與失敗降級機制。
 - [ ] 加入認證授權、rate limiting、structured logging、metrics、trace、Docker 與部署設定。
-- [ ] 與 API 呼叫端定稿 contract；本版新增 `profile`、severity、judge votes 與信賴區間上界判定。
+- [ ] 與 API 呼叫端定稿 contract；本版保留 `profile`、severity、人工覆核旗標與信賴區間上界判定。
 
 ## 參考資料
 

@@ -76,7 +76,7 @@ def apply_risk_assumptions(
 ) -> tuple[Scenario, list[AppliedRiskAssumption]]:
     """Apply only catalog effects selected by risk ID and an enumerated severity.
 
-    An uncertain judge result is intentionally simulated with the catalog's high
+    An uncertain Agent result is intentionally simulated with the catalog's high
     assumptions, but remains labelled uncertain in the returned audit record.
     """
     result = scenario.model_copy(deep=True)
@@ -448,7 +448,7 @@ def search_capacity_plan(
 def _build_risk_cards(
     matches: list[RiskMatch], applied: list[AppliedRiskAssumption]
 ) -> list[RiskCard]:
-    """Join judge output + applied simulation effects + catalog metadata into one display card."""
+    """Join Agent output + applied simulation effects + catalog metadata into one display card."""
     catalog = {item["risk_id"]: item for item in load_risk_catalog()}
     effects_by_id = {item.risk_id: item.effects for item in applied}
     cards = []

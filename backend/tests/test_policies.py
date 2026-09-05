@@ -11,10 +11,10 @@ from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 
 from openingguard.agent import (
-    _aggregate_judgments,
-    _judge_agent,
-    _judge_instructions,
+    _agent_instructions,
+    _build_decision,
     _public_event_payload,
+    _risk_agent,
     load_prompt_examples,
 )
 from openingguard.budget_experiment import (
@@ -33,18 +33,20 @@ from openingguard.core import (
     apply_risk_assumptions,
     load_scenario,
 )
-from openingguard.schemas import JudgeVote, StrategySummary
+from openingguard.schemas import SubmitRiskJudgment, StrategySummary
 from tools.calibrate import CALIBRATION_PROFILES, _passes_rate_rule
 
 
-def _vote(judge_id: str, severity: str) -> JudgeVote:
+def _judgment(
+    severity: str, decision_status: str = "confirmed"
+) -> SubmitRiskJudgment:
     bits = {
         "low": (0, 0),
         "medium": (1, 0),
         "high": (1, 1),
     }[severity]
-    return JudgeVote(
-        judge_id=judge_id,
+    return SubmitRiskJudgment(
+        decision_status=decision_status,
         no_confident_match=False,
         risk_matches=[
             {
@@ -52,7 +54,7 @@ def _vote(judge_id: str, severity: str) -> JudgeVote:
                 "is_at_least_medium": bits[0],
                 "is_high": bits[1],
                 "matched_input_text": "大量送單",
-                "reason": "測試票",
+                "reason": "測試判斷",
             }
         ],
     )
@@ -125,40 +127,26 @@ class RiskPolicyTests(unittest.TestCase):
                 self.assertIn(match["matched_input_text"], record["annotation_text_zh"])
 
     def test_prompt_defines_capacity_impact_and_forbids_numeric_outputs(self) -> None:
-        prompt = _judge_instructions("test_judge", "測試觀點。")
+        prompt = _agent_instructions()
         self.assertIn("severity 代表容量影響，不代表事件發生機率", prompt)
         self.assertIn("人工標記範例是分級示範", prompt)
         self.assertIn("不可產生倍率、RPS、worker 數", prompt)
 
-    def test_three_way_severity_split_stays_uncertain_and_previews_high(self) -> None:
-        selection = _aggregate_judgments(
-            [
-                _vote("market", "low"),
-                _vote("capacity", "medium"),
-                _vote("audit", "high"),
-            ]
-        )
+    def test_uncertain_single_judgment_previews_high(self) -> None:
+        selection = _build_decision(_judgment("medium", "uncertain"))
         match = selection.risk_matches[0]
         self.assertEqual(match.severity, "uncertain")
         self.assertEqual(match.simulation_assumption, "high")
         self.assertTrue(selection.requires_human_review)
-        self.assertFalse(selection.auto_approved)
 
-    def test_two_high_votes_form_high_majority(self) -> None:
-        selection = _aggregate_judgments(
-            [
-                _vote("market", "high"),
-                _vote("capacity", "high"),
-                _vote("audit", "medium"),
-            ]
-        )
+    def test_confirmed_single_judgment_keeps_high(self) -> None:
+        selection = _build_decision(_judgment("high"))
         self.assertEqual(selection.risk_matches[0].severity, "high")
         self.assertEqual(selection.decision_status, "confirmed")
+        self.assertFalse(selection.requires_human_review)
 
-    def test_consensus_exposes_selected_risks_for_the_simulator(self) -> None:
-        selection = _aggregate_judgments(
-            [_vote("market", "high"), _vote("capacity", "high"), _vote("audit", "high")]
-        )
+    def test_single_decision_exposes_selected_risks_for_the_simulator(self) -> None:
+        selection = _build_decision(_judgment("high"))
         risks = selection.selected_risks
         self.assertEqual(
             [item.risk_id for item in risks], ["market_volatility_order_spike"]
@@ -191,9 +179,10 @@ def _judgment_response(info, quote: str) -> ModelResponse:
                             "is_at_least_medium": 1,
                             "is_high": 0,
                             "matched_input_text": quote,
-                            "reason": "測試票",
+                            "reason": "測試判斷",
                         }
                     ],
+                    "decision_status": "confirmed",
                     "no_confident_match": False,
                 },
             )
@@ -201,7 +190,7 @@ def _judgment_response(info, quote: str) -> ModelResponse:
     )
 
 
-class JudgeOutputTests(unittest.TestCase):
+class AgentOutputTests(unittest.TestCase):
     NOTE = "夜盤大跌，預期大量送單"
 
     def test_hallucinated_quote_is_sent_back_to_the_model(self) -> None:
@@ -212,7 +201,7 @@ class JudgeOutputTests(unittest.TestCase):
             quote = "備註中不存在的字" if len(attempts) == 1 else "大量送單"
             return _judgment_response(info, quote)
 
-        agent = _judge_agent("test_judge", "測試觀點。", self.NOTE)
+        agent = _risk_agent(self.NOTE)
         with agent.override(model=FunctionModel(flaky, model_name="flaky")):
             output = agent.run_sync("{}").output
         self.assertEqual(len(attempts), 2)
@@ -225,12 +214,16 @@ class JudgeOutputTests(unittest.TestCase):
                 parts=[
                     ToolCallPart(
                         tool_name=info.output_tools[0].name,
-                        args={"risk_matches": [], "no_confident_match": False},
+                        args={
+                            "risk_matches": [],
+                            "decision_status": "no_match",
+                            "no_confident_match": False,
+                        },
                     )
                 ]
             )
 
-        agent = _judge_agent("test_judge", "測試觀點。", self.NOTE)
+        agent = _risk_agent(self.NOTE)
         with agent.override(model=FunctionModel(liar, model_name="liar")):
             output = agent.run_sync("{}").output
         self.assertTrue(output.no_confident_match)
