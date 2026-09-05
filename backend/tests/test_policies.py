@@ -2,11 +2,12 @@
 
 from argparse import Namespace
 from copy import deepcopy
+import json
 import unittest
 
-from openingguard.agent import _aggregate_judgments
+from openingguard.agent import _aggregate_judgments, _judge_instructions, load_prompt_examples
 from openingguard.calibrate import CALIBRATION_PROFILES, _passes_rate_rule
-from openingguard.core import _passes_constraints, apply_risk_assumptions, load_scenario
+from openingguard.core import DATA_DIR, _passes_constraints, apply_risk_assumptions, load_scenario
 
 
 def _vote(judge_id: str, severity: str) -> dict:
@@ -33,6 +34,28 @@ def _vote(judge_id: str, severity: str) -> dict:
 
 
 class RiskPolicyTests(unittest.TestCase):
+    def test_prompt_examples_cover_rubric_and_are_held_out(self) -> None:
+        prompt_document = load_prompt_examples()
+        examples = prompt_document["examples"]
+        severities = {
+            (match["is_at_least_medium"], match["is_high"])
+            for example in examples
+            for match in example["risk_matches"]
+        }
+        self.assertTrue({(0, 0), (1, 0), (1, 1)}.issubset(severities))
+        self.assertTrue(any(example["no_confident_match"] for example in examples))
+
+        eval_cases = json.loads((DATA_DIR / "eval_cases.json").read_text(encoding="utf-8"))
+        prompt_notes = {example["operation_note"] for example in examples}
+        eval_notes = {case["operation_note"] for case in eval_cases}
+        self.assertTrue(prompt_notes.isdisjoint(eval_notes))
+
+    def test_prompt_defines_capacity_impact_and_forbids_numeric_outputs(self) -> None:
+        prompt = _judge_instructions("test_judge", "測試觀點。")
+        self.assertIn("severity 代表容量影響，不代表事件發生機率", prompt)
+        self.assertIn("人工標記範例是分級示範", prompt)
+        self.assertIn("不可產生倍率、RPS、worker 數", prompt)
+
     def test_three_way_severity_split_stays_uncertain_and_previews_high(self) -> None:
         selection = _aggregate_judgments(
             [_vote("market", "low"), _vote("capacity", "medium"), _vote("audit", "high")]

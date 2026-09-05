@@ -203,15 +203,16 @@ gateway peak utilization < 95%
 ## OpenAI Agent 決策流程
 
 1. 後端依 `scenario_id` 載入版本化的固定結構化參數，呼叫端只提供情境 ID 與自然語言營運備註。
-2. 三個 judge 分別採市場事件、系統容量與風險稽核視角；預設可共用同一個 OpenAI model，也可透過 `OPENAI_JUDGE_MODELS` 指定三個可用的 OpenAI model。
-3. 每個 judge 只能從 `risk_catalog.json` 選擇最多三個既有 `risk_id`。
-4. 嚴重度不是任意分數，而是兩個有序的 0/1 判斷：`is_at_least_medium` 與 `is_high`；`is_high=1` 時前者必須為 1。
-5. `matched_input_text` 必須逐字出現在營運備註中。
-6. 每個 judge 必須呼叫 strict function tool `submit_risk_judgment`；模型不得輸出倍率、RPS 或 worker 數。
-7. Python 彙整三票並從可信目錄補上來源 URL，再依 `risk_id + severity` 套用固定倍率。
-8. 多數票決定 `low`、`medium` 或 `high`。沒有多數共識時保留 `severity=uncertain`，但以固定的 `high` 參數產生最壞情境預覽。
-9. `uncertain` 必須回傳 `requires_human_review=true`、`auto_approved=false`，不得自動部署或把預覽冒充正式判斷。
-10. Python 執行模擬並以確定性文字整理結果；最終容量決策一律等待人工核准。
+2. 三個 judge 共用 `prompt_examples.json` 中 12 筆經確認的人工標記 few-shot 範例與同一套 severity rubric。
+3. 三個 judge 分別採市場事件、系統容量與風險稽核視角；預設可共用同一個 OpenAI model，也可透過 `OPENAI_JUDGE_MODELS` 指定三個可用的 OpenAI model。
+4. 每個 judge 只能從 `risk_catalog.json` 選擇最多三個既有 `risk_id`。
+5. 嚴重度不是任意分數，而是兩個有序的 0/1 判斷：`is_at_least_medium` 與 `is_high`；`is_high=1` 時前者必須為 1。
+6. `matched_input_text` 必須逐字出現在待判斷的營運備註中，不能複製 few-shot 範例的文字。
+7. 每個 judge 必須呼叫 strict function tool `submit_risk_judgment`；模型不得輸出倍率、RPS 或 worker 數。
+8. Python 彙整三票並從可信目錄補上來源 URL，再依 `risk_id + severity` 套用固定倍率。
+9. 多數票決定 `low`、`medium` 或 `high`。沒有多數共識時保留 `severity=uncertain`，但以固定的 `high` 參數產生最壞情境預覽。
+10. `uncertain` 必須回傳 `requires_human_review=true`、`auto_approved=false`，不得自動部署或把預覽冒充正式判斷。
+11. Python 執行模擬並以確定性文字整理結果；最終容量決策一律等待人工核准。
 
 ### 風險嚴重度與固定倍率
 
@@ -226,7 +227,9 @@ gateway peak utilization < 95%
 
 `risk_catalog.json` 已為每個 `risk_id` 保存 low／medium／high 的固定 `simulation_assumptions`。倍率由 Git 版本化 JSON 決定，Agent 不能自行創造或修改數值。
 
-同一模型的三個 judge 具有相關性，因此不能把 3 票當作 3 個獨立隨機樣本。15 筆人工標註案例涵蓋 low／medium／high、multi-risk 與 no-match，除 Top-1、Top-3 與 no-match false-positive 外，也輸出 severity confusion matrix、accuracy、macro-F1、coverage 與 covered cases 的 quadratic weighted kappa。
+同一模型的三個 judge 具有相關性，因此不能把 3 票當作 3 個獨立隨機樣本。資料嚴格分成兩份：12 筆 `prompt_examples.json` 只用於 few-shot 示範；15 筆 `eval_cases.json` 是不送進 prompt 的 held-out 測試集。程式會拒絕兩份資料中出現相同營運備註。評測除 Top-1、Top-3 與 no-match false-positive 外，也輸出 severity confusion matrix、accuracy、macro-F1、coverage 與 covered cases 的 quadratic weighted kappa。
+
+實際 rubric prompt 存放在 `openingguard.agent._judge_instructions`，版本為 `openingguard-agent-v3-few-shot`。固定 prompt 與 examples 放在請求前段，待判斷的 `target_operation_note` 放在最後；strict function schema 仍透過 Responses API 的 `tools` 欄位傳入，不靠文字解析 JSON。
 
 若沒有 `OPENAI_API_KEY`，程式會改用簡單關鍵字備援，並明確標示：
 
@@ -454,7 +457,8 @@ backend/
     ├── core.py                       # 流量、Queue、策略與容量搜尋核心
     └── data/
         ├── risk_catalog.json         # 10 種固定風險與倍率
-        ├── eval_cases.json           # 15 筆人工標記 Agent 案例
+        ├── prompt_examples.json      # 12 筆人工標記 few-shot 範例
+        ├── eval_cases.json           # 15 筆 held-out Agent 評測案例
         └── scenarios/
             ├── normal.json
             ├── high_pressure.json
@@ -469,10 +473,11 @@ backend/
 - [x] 嚴重度使用兩個有序 0/1 欄位，並由 Python 驗證 `high` 必須同時滿足 `at_least_medium`。
 - [x] 無多數共識時保留 `uncertain`，模擬採固定 high 參數做最壞情境預覽，禁止自動核准。
 - [x] Agent 人工案例補上 severity 標記與 accuracy、macro-F1、coverage、quadratic weighted kappa 輸出。
+- [x] Agent 加入獨立版本化的人工標記 few-shot examples，並禁止與 held-out eval cases 重疊。
 - [x] 校準器加入 quick／evidence profile、warm-up、30 秒量測、5 次重複、2 秒 drain-out 與 bootstrap mean 95% interval。
 - [x] 最大穩定 RPS 改為所有 repetitions 都需符合 99.9% within-SLO、錯誤率、P95 與 Queue 排空規則。
 - [x] 新增 Wilson 上界、Agent 多數決、uncertain→high 預覽與校準門檻的 regression tests。
-- [x] 完成 `uv sync --locked`、Python compile、7 項 regression tests 與 FastAPI smoke test。
+- [x] 完成 `uv sync --locked`、Python compile、9 項 regression tests 與 FastAPI smoke test。
 - [x] 使用 `seed=20260904, runs=500` 重跑統計 Notebook；13 個 code cells 全數成功且每個前面都有 Markdown 說明。
 - [x] 使用新版 quick profile 重跑本機 mock 校準，輸出明確標為探索性而非正式證據。
 
@@ -480,7 +485,7 @@ backend/
 
 | 項目 | 結果 |
 |---|---|
-| 靜態／政策測試 | compile 成功；`unittest` 7/7 通過 |
+| 靜態／政策測試 | compile 成功；`unittest` 9/9 通過 |
 | FastAPI | `/api/health`、一般模擬、無 key 的離線 Agent 路徑皆回 200 |
 | 500-run 合成 high-pressure 情境 | fixed 83.6%、reactive 83.4%、predictive 0% 壅塞；predictive Wilson 95% 上界 0.76% |
 | 2,000-run 三策略效能基準 | 本機耗時 579.37 秒；適合離線證據，不適合 Demo 即時計算 |

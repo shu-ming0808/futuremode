@@ -12,8 +12,9 @@ from .core import DATA_DIR, build_assessment, load_risk_catalog, load_scenario
 
 
 DEFAULT_MODEL = "gpt-5.1"
-PROMPT_VERSION = "openingguard-agent-v2"
+PROMPT_VERSION = "openingguard-agent-v3-few-shot"
 KB_VERSION = "risk-catalog-v2"
+PROMPT_EXAMPLES_FILE = DATA_DIR / "prompt_examples.json"
 JUDGE_ROLES = (
     (
         "market_evidence",
@@ -43,6 +44,44 @@ def _catalog_for_prompt() -> list[dict[str, Any]]:
     return [{key: item[key] for key in fields} for item in load_risk_catalog()]
 
 
+def load_prompt_examples() -> dict[str, Any]:
+    """Load and validate human-approved few-shot examples separately from eval data."""
+    payload = json.loads(PROMPT_EXAMPLES_FILE.read_text(encoding="utf-8"))
+    examples = payload.get("examples")
+    if not payload.get("prompt_examples_version") or not isinstance(examples, list):
+        raise ValueError("prompt_examples.json 缺少版本或 examples")
+    known_risks = {item["risk_id"] for item in load_risk_catalog()}
+    seen_ids: set[str] = set()
+    seen_notes: set[str] = set()
+    for example in examples:
+        example_id = str(example.get("example_id", ""))
+        operation_note = str(example.get("operation_note", ""))
+        matches = example.get("risk_matches", [])
+        if not example_id or example_id in seen_ids:
+            raise ValueError("prompt example_id 必須存在且不可重複")
+        if not operation_note or operation_note in seen_notes:
+            raise ValueError("prompt operation_note 必須存在且不可重複")
+        if bool(example.get("no_confident_match")) == bool(matches):
+            raise ValueError("prompt example 的 no_confident_match 與 risk_matches 不一致")
+        seen_ids.add(example_id)
+        seen_notes.add(operation_note)
+        seen_risks: set[str] = set()
+        for match in matches:
+            risk_id = str(match.get("risk_id", ""))
+            quote = str(match.get("matched_input_text", ""))
+            if risk_id not in known_risks or risk_id in seen_risks:
+                raise ValueError(f"prompt example 含未知或重複 risk_id：{risk_id}")
+            if not quote or quote not in operation_note:
+                raise ValueError("prompt example 的 matched_input_text 必須逐字出現在備註")
+            medium = match.get("is_at_least_medium")
+            high = match.get("is_high")
+            if medium not in (0, 1) or high not in (0, 1):
+                raise ValueError("prompt example 的 severity bits 只能是 0 或 1")
+            _bits_to_severity(int(medium), int(high))
+            seen_risks.add(risk_id)
+    return payload
+
+
 def _judge_tool_schema() -> dict[str, Any]:
     risk_ids = [item["risk_id"] for item in load_risk_catalog()]
     return {
@@ -62,11 +101,29 @@ def _judge_tool_schema() -> dict[str, Any]:
                     "items": {
                         "type": "object",
                         "properties": {
-                            "risk_id": {"type": "string", "enum": risk_ids},
-                            "is_at_least_medium": {"type": "integer", "enum": [0, 1]},
-                            "is_high": {"type": "integer", "enum": [0, 1]},
-                            "matched_input_text": {"type": "string"},
-                            "reason": {"type": "string"},
+                            "risk_id": {
+                                "type": "string",
+                                "enum": risk_ids,
+                                "description": "A risk ID from the supplied fixed catalog.",
+                            },
+                            "is_at_least_medium": {
+                                "type": "integer",
+                                "enum": [0, 1],
+                                "description": "1 only when capacity impact is at least medium.",
+                            },
+                            "is_high": {
+                                "type": "integer",
+                                "enum": [0, 1],
+                                "description": "1 only for explicit evidence of high capacity impact.",
+                            },
+                            "matched_input_text": {
+                                "type": "string",
+                                "description": "A non-empty verbatim quote from the target operation note.",
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": "A short rubric-based explanation without capacity numbers.",
+                            },
                         },
                         "required": [
                             "risk_id",
@@ -78,7 +135,10 @@ def _judge_tool_schema() -> dict[str, Any]:
                         "additionalProperties": False,
                     },
                 },
-                "no_confident_match": {"type": "boolean"},
+                "no_confident_match": {
+                    "type": "boolean",
+                    "description": "True only when risk_matches is empty due to insufficient evidence.",
+                },
             },
             "required": ["risk_matches", "no_confident_match"],
             "additionalProperties": False,
@@ -261,6 +321,33 @@ def _judge_models() -> list[str]:
     return configured
 
 
+def _judge_instructions(judge_id: str, perspective: str) -> str:
+    """Stable rubric prompt; the strict output schema remains in the tools field."""
+    return (
+        "# Role and objective\n"
+        f"你是 OpeningGuard AI 的券商下單容量風險 judge，角色為 {judge_id}。{perspective}\n"
+        "根據目標營運備註、版本化系統情境、固定風險目錄與人工標記範例，"
+        "選擇最多三個 risk_id，並判斷事件若發生時對下單系統容量的影響程度。\n\n"
+        "# Decision rules\n"
+        "- severity 代表容量影響，不代表事件發生機率。\n"
+        "- low：只有輕微異常或小幅負載增加，容量仍充足，沒有 Queue、等待或逾時。\n"
+        "- medium：可能明顯增加 Queue、服務時間或資源使用，但尚無直接證據顯示已滿載或違反 SLO。\n"
+        "- high：有明確證據顯示 Queue 持續累積、DB pool 接近耗盡、交易閘道達硬上限、"
+        "大量逾時／立即重試，或擴容會晚於尖峰，可能直接違反 SLO。\n"
+        "- low 對應 is_at_least_medium=0, is_high=0。\n"
+        "- medium 對應 is_at_least_medium=1, is_high=0。\n"
+        "- high 對應 is_at_least_medium=1, is_high=1。\n"
+        "- 不可只因看到單一關鍵字就判為 high；必須考慮完整上下文及影響描述。\n"
+        "- 人工標記範例是分級示範，不是待判斷資料；不可複製範例中的證據文字到新案例。\n"
+        "- matched_input_text 必須是 target_operation_note 的非空逐字引用。\n"
+        "- 沒有足夠原文證據時傳空 risk_matches，並將 no_confident_match 設為 true。\n"
+        "- 不可創造目錄外 risk_id，不可產生倍率、RPS、worker 數或其他容量參數。\n"
+        "- 不可聲稱委託已成交。\n\n"
+        "# Output\n"
+        "最後必須且只能呼叫 submit_risk_judgment；輸出格式由工具 schema 約束。"
+    )
+
+
 def _llm_judge(
     operation_note: str,
     scenario_id: str,
@@ -271,7 +358,14 @@ def _llm_judge(
     from openai import OpenAI
 
     scenario = load_scenario(scenario_id)
+    prompt_examples = load_prompt_examples()
     payload = {
+        "risk_catalog": _catalog_for_prompt(),
+        "human_labeled_examples": {
+            "prompt_examples_version": prompt_examples["prompt_examples_version"],
+            "labeling_policy_version": prompt_examples["labeling_policy_version"],
+            "examples": prompt_examples["examples"],
+        },
         "structured_scenario": {
             "scenario_id": scenario_id,
             "scenario_version": scenario["scenario_version"],
@@ -280,21 +374,11 @@ def _llm_judge(
             "slo": scenario["slo"],
             "retry": scenario["retry"],
         },
-        "operation_note": operation_note,
-        "risk_catalog": _catalog_for_prompt(),
+        "target_operation_note": operation_note,
     }
     response = OpenAI().responses.create(
         model=model,
-        instructions=(
-            f"你是券商內部容量風險 judge，角色為 {judge_id}。{perspective} "
-            "severity 只代表事件對系統容量的影響，不代表發生機率。low 表示容量影響有限；"
-            "medium 表示可能明顯增加 Queue 或資源使用；high 表示可能造成逾時、下游飽和或違反 SLO。"
-            "從目錄選最多三個 risk_id，並用兩個有序 0/1 欄位表達 severity。"
-            "is_high=1 時 is_at_least_medium 必須為 1。matched_input_text 必須逐字來自 operation_note。"
-            "沒有可信證據時傳空陣列並將 no_confident_match 設為 true。"
-            "不可產生倍率、RPS 或 worker 數，不可創造目錄以外的 risk_id，也不可聲稱委託已成交。"
-            "最後必須呼叫 submit_risk_judgment。"
-        ),
+        instructions=_judge_instructions(judge_id, perspective),
         input=json.dumps(payload, ensure_ascii=False),
         tools=[_judge_tool_schema()],
         tool_choice={"type": "function", "name": "submit_risk_judgment"},
@@ -483,7 +567,16 @@ def _weighted_kappa(expected: list[str], predicted: list[str]) -> float | None:
 def evaluate_llm() -> dict[str, Any]:
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("缺少 OPENAI_API_KEY；離線備援不能冒充 LLM 評測")
+    prompt_examples = load_prompt_examples()
     cases = json.loads((DATA_DIR / "eval_cases.json").read_text(encoding="utf-8"))
+    prompt_notes = {
+        " ".join(example["operation_note"].split()).casefold()
+        for example in prompt_examples["examples"]
+    }
+    eval_notes = {" ".join(case["operation_note"].split()).casefold() for case in cases}
+    overlap = prompt_notes & eval_notes
+    if overlap:
+        raise RuntimeError("prompt examples 與 held-out eval cases 發生資料洩漏")
     top1_hits = 0
     top3_hits = 0
     no_match_total = 0
@@ -541,6 +634,9 @@ def evaluate_llm() -> dict[str, Any]:
     return {
         "models": _judge_models(),
         "prompt_version": PROMPT_VERSION,
+        "prompt_examples_version": prompt_examples["prompt_examples_version"],
+        "prompt_example_count": len(prompt_examples["examples"]),
+        "evaluation_split": "held_out_not_in_prompt",
         "knowledge_base_version": KB_VERSION,
         "cases": len(cases),
         "top1_accuracy": top1_hits / matched_cases if matched_cases else 0.0,

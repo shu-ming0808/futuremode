@@ -1,0 +1,174 @@
+{
+  "prompt_examples_version": "2026-09-05-v1",
+  "labeling_policy_version": "capacity-impact-v1",
+  "review_status": "user_approved_first_version",
+  "examples": [
+    {
+      "example_id": "prompt_001",
+      "operation_note": "海外市場小幅震盪，預估明早委託僅略增，現有 worker 容量仍充足",
+      "risk_matches": [
+        {
+          "risk_id": "market_volatility_order_spike",
+          "is_at_least_medium": 0,
+          "is_high": 0,
+          "matched_input_text": "海外市場小幅震盪",
+          "reason": "只有小幅增加，而且備註明確表示容量仍充足。"
+        }
+      ],
+      "no_confident_match": false
+    },
+    {
+      "example_id": "prompt_002",
+      "operation_note": "夜盤成交量明顯放大，預估開盤會有集中送單並增加入口 Queue，但尚未出現逾時",
+      "risk_matches": [
+        {
+          "risk_id": "market_volatility_order_spike",
+          "is_at_least_medium": 1,
+          "is_high": 0,
+          "matched_input_text": "集中送單並增加入口 Queue",
+          "reason": "可能明顯增加 Queue，但尚未出現逾時或容量滿載。"
+        }
+      ],
+      "no_confident_match": false
+    },
+    {
+      "example_id": "prompt_003",
+      "operation_note": "今晚部署新版商品服務，盤前同步作業可能占用部分共享資源，但目前尚有容量餘裕",
+      "risk_matches": [
+        {
+          "risk_id": "release_product_file_download",
+          "is_at_least_medium": 1,
+          "is_high": 0,
+          "matched_input_text": "盤前同步作業可能占用部分共享資源",
+          "reason": "共享資源可能明顯受影響，但尚未滿載。"
+        }
+      ],
+      "no_confident_match": false
+    },
+    {
+      "example_id": "prompt_004",
+      "operation_note": "監控顯示 DB connection pool 已用滿，大量下單請求正在等待連線",
+      "risk_matches": [
+        {
+          "risk_id": "database_connection_saturation",
+          "is_at_least_medium": 1,
+          "is_high": 1,
+          "matched_input_text": "DB connection pool 已用滿",
+          "reason": "已明確出現連線池滿載及請求等待。"
+        }
+      ],
+      "no_confident_match": false
+    },
+    {
+      "example_id": "prompt_005",
+      "operation_note": "交易閘道每秒接受量已達限流上限，增加 API worker 後吞吐仍未改善",
+      "risk_matches": [
+        {
+          "risk_id": "gateway_rate_limit",
+          "is_at_least_medium": 1,
+          "is_high": 1,
+          "matched_input_text": "交易閘道每秒接受量已達限流上限",
+          "reason": "下游已達硬上限，增加 worker 無法改善端到端吞吐。"
+        }
+      ],
+      "no_confident_match": false
+    },
+    {
+      "example_id": "prompt_006",
+      "operation_note": "客戶端逾時後立即重送，同一委託短時間出現多次 attempt，入口流量持續放大",
+      "risk_matches": [
+        {
+          "risk_id": "retry_storm",
+          "is_at_least_medium": 1,
+          "is_high": 1,
+          "matched_input_text": "逾時後立即重送",
+          "reason": "立即重試已把單一委託意圖放大成多次請求。"
+        }
+      ],
+      "no_confident_match": false
+    },
+    {
+      "example_id": "prompt_007",
+      "operation_note": "入口 Queue 開始上升，worker 利用率偏高，但 Database 與閘道仍有餘裕且尚未逾時",
+      "risk_matches": [
+        {
+          "risk_id": "worker_capacity_saturation",
+          "is_at_least_medium": 1,
+          "is_high": 0,
+          "matched_input_text": "入口 Queue 開始上升",
+          "reason": "已有容量退化訊號，但尚未滿載或違反 SLO。"
+        }
+      ],
+      "no_confident_match": false
+    },
+    {
+      "example_id": "prompt_008",
+      "operation_note": "HPA 已觸發，但新容器需要四十五秒才 ready，預估容量會晚於開盤尖峰到位",
+      "risk_matches": [
+        {
+          "risk_id": "cold_start_autoscaling_delay",
+          "is_at_least_medium": 1,
+          "is_high": 1,
+          "matched_input_text": "容量會晚於開盤尖峰到位",
+          "reason": "擴容完成時間晚於尖峰，可能直接造成 Queue 與逾時。"
+        }
+      ],
+      "no_confident_match": false
+    },
+    {
+      "example_id": "prompt_009",
+      "operation_note": "快取命中率小幅下降，目前沒有增加 DB 等待或入口 Queue",
+      "risk_matches": [
+        {
+          "risk_id": "cache_cold_start",
+          "is_at_least_medium": 0,
+          "is_high": 0,
+          "matched_input_text": "快取命中率小幅下降",
+          "reason": "只有輕微變化，尚未造成 DB 等待或 Queue。"
+        }
+      ],
+      "no_confident_match": false
+    },
+    {
+      "example_id": "prompt_010",
+      "operation_note": "DNS 間歇解析失敗並造成少量連線重試，目前尚未形成全面壅塞",
+      "risk_matches": [
+        {
+          "risk_id": "network_dependency_failure",
+          "is_at_least_medium": 1,
+          "is_high": 0,
+          "matched_input_text": "DNS 間歇解析失敗",
+          "reason": "已有外部依賴失敗與重試，但尚未形成全面壅塞。"
+        }
+      ],
+      "no_confident_match": false
+    },
+    {
+      "example_id": "prompt_011",
+      "operation_note": "今晚發版，同時擴容節點啟動時間比平常稍久，可能增加部分開盤等待但仍有備援容量",
+      "risk_matches": [
+        {
+          "risk_id": "release_product_file_download",
+          "is_at_least_medium": 1,
+          "is_high": 0,
+          "matched_input_text": "今晚發版",
+          "reason": "發版可能占用共享資源，但仍有備援容量。"
+        },
+        {
+          "risk_id": "cold_start_autoscaling_delay",
+          "is_at_least_medium": 1,
+          "is_high": 0,
+          "matched_input_text": "擴容節點啟動時間比平常稍久",
+          "reason": "啟動較慢可能增加等待，但沒有證據顯示容量會晚於尖峰。"
+        }
+      ],
+      "no_confident_match": false
+    },
+    {
+      "example_id": "prompt_012",
+      "operation_note": "明日辦公室飲水機保養，不影響機房或交易系統",
+      "risk_matches": [],
+      "no_confident_match": true
+    }
+  ]
+}
