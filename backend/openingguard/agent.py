@@ -317,8 +317,7 @@ def _judge_payload(operation_note: str, scenario_id: str) -> str:
     )
 
 
-def _llm_select(operation_note: str, scenario_id: str) -> JudgeConsensus:
-    payload = _judge_payload(operation_note, scenario_id)
+def _run_judges(operation_note: str, payload: str) -> JudgeConsensus:
     agents = [
         _judge_agent(judge_id, perspective, operation_note)
         for judge_id, perspective in JUDGE_ROLES
@@ -341,6 +340,57 @@ def _llm_select(operation_note: str, scenario_id: str) -> JudgeConsensus:
     consensus = _aggregate_judgments(judgments)
     consensus.model = SETTINGS.agent.openai_model
     return consensus
+
+
+def _llm_select(operation_note: str, scenario_id: str) -> JudgeConsensus:
+    return _run_judges(operation_note, _judge_payload(operation_note, scenario_id))
+
+
+def _public_event_payload(
+    operation_note: str, event_metadata: dict[str, Any]
+) -> dict[str, Any]:
+    """Build the Agent input without simulation truth or hidden future traffic."""
+    prompt_examples = load_prompt_examples()
+    allowed_metadata = {
+        key: event_metadata[key]
+        for key in (
+            "event_id",
+            "published_at",
+            "available_at",
+            "expected_start",
+            "source",
+        )
+        if key in event_metadata
+    }
+    return {
+        "risk_catalog": _catalog_for_prompt(),
+        "human_labeled_examples": {
+            "prompt_examples_version": prompt_examples["prompt_examples_version"],
+            "labeling_policy_version": prompt_examples["labeling_policy_version"],
+            "examples": prompt_examples["examples"],
+        },
+        "public_event_metadata": allowed_metadata,
+        "target_operation_note": operation_note,
+        "information_boundary": (
+            "只能使用截至 available_at 已公開的事件資料；沒有模擬真值、未來 RPS 或實際尖峰結果。"
+        ),
+    }
+
+
+def select_public_event(
+    operation_note: str, event_metadata: dict[str, Any]
+) -> JudgeConsensus:
+    """Run real OpenAI judges using only timestamped public event information."""
+    if SETTINGS.agent.provider != "openai":
+        raise RuntimeError("公開事件的 OpenAI 評測不可使用 mock provider")
+    if not SETTINGS.agent.openai_api_key:
+        raise RuntimeError("缺少 OPENAI_API_KEY，不能將 fixture 冒充成 LLM Agent 結果")
+    return _run_judges(
+        operation_note,
+        json.dumps(
+            _public_event_payload(operation_note, event_metadata), ensure_ascii=False
+        ),
+    )
 
 
 def run_agent_assessment(

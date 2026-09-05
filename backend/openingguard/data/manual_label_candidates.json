@@ -1,0 +1,931 @@
+{
+  "dataset_version": "2026-09-05-v3",
+  "dataset_role": "single_reviewer_labeled_real_incident_candidates",
+  "record_count": 14,
+  "labeling_policy_version": "capacity-impact-v1",
+  "collection_method": {
+    "description": "以公開搜尋先找出券商、交易平台與相鄰市場基礎設施事故，再由人工閱讀來源、去重、摘要與拆分金額類型。這不是全自動網路爬蟲輸出。",
+    "source_priority": [
+      "regulator_or_exchange_report",
+      "company_filing_or_incident_disclosure",
+      "reputable_news_with_company_or_regulator_response"
+    ],
+    "cutoff_date": "2026-09-05",
+    "warning": "來源沒有公開金額時保留 null；不得把錯帳名目金額、客戶補償、監管罰款或個別網友聲稱的損失冒充公司直接損失。"
+  },
+  "valid_risk_ids": [
+    "market_volatility_order_spike",
+    "release_product_file_download",
+    "database_connection_saturation",
+    "gateway_rate_limit",
+    "retry_storm",
+    "worker_capacity_saturation",
+    "cold_start_autoscaling_delay",
+    "cache_cold_start",
+    "network_dependency_failure",
+    "unknown_unquantified_risk"
+  ],
+  "valid_severity_bits": {
+    "low": {
+      "is_at_least_medium": 0,
+      "is_high": 0
+    },
+    "medium": {
+      "is_at_least_medium": 1,
+      "is_high": 0
+    },
+    "high": {
+      "is_at_least_medium": 1,
+      "is_high": 1
+    }
+  },
+  "records": [
+    {
+      "candidate_id": "real_001",
+      "incident_date": "2024-08-05",
+      "entity": "永豐金證券",
+      "entity_type": "broker",
+      "region": "TW",
+      "scope_match": "direct_broker_order_service",
+      "annotation_text_zh": "台股盤中劇烈下跌且交易量放大，券商多個電子交易平台出現登入、委託回報與查詢逾時。公司說明登入程式效能欠佳，登入過程的資料庫回應緩慢，部分客戶直到上午十一時後才恢復正常。",
+      "observed_impact": {
+        "duration_minutes": null,
+        "affected_clients": null,
+        "affected_functions": [
+          "login",
+          "order_report",
+          "account_query"
+        ]
+      },
+      "money": {
+        "company_direct_loss": null,
+        "customer_compensation": null,
+        "regulatory_fine": null,
+        "erroneous_trade_notional": null,
+        "disclosure_status": "not_disclosed"
+      },
+      "sources": [
+        {
+          "title": "台股暴跌下單系統一度當機 永豐金證：已恢復",
+          "url": "https://www.cna.com.tw/news/afe/202408050100.aspx",
+          "source_type": "reputable_news_with_company_response"
+        }
+      ],
+      "annotation": {
+        "event_rating": {
+          "score": 1,
+          "severity": "medium",
+          "source": "user_chat_round_1_with_ai_draft",
+          "input_basis": "existing_incident_summary_ai_draft_user_approved",
+          "rationale": "市場交易量放大並伴隨資料庫回應緩慢，已影響登入、委託回報與查詢，但沒有全部服務停擺證據。",
+          "rubric_review_status": "user_approved_first_version"
+        },
+        "risk_matches": [
+          {
+            "risk_id": "market_volatility_order_spike",
+            "is_at_least_medium": 1,
+            "is_high": 0,
+            "matched_input_text": "交易量放大",
+            "reason": "市場劇烈波動與交易量放大可能使短時間請求量上升。"
+          },
+          {
+            "risk_id": "database_connection_saturation",
+            "is_at_least_medium": 1,
+            "is_high": 0,
+            "matched_input_text": "資料庫回應緩慢",
+            "reason": "資料庫回應緩慢顯示下游資料存取可能形成容量瓶頸。"
+          }
+        ],
+        "no_confident_match": false,
+        "reviewer": "user",
+        "status": "fully_labeled_user_approved_first_version",
+        "review_status": "user_approved_first_version"
+      }
+    },
+    {
+      "candidate_id": "real_002",
+      "incident_date": "2026-04-07",
+      "entity": "台新證券",
+      "entity_type": "broker",
+      "region": "TW",
+      "scope_match": "direct_broker_order_service",
+      "annotation_text_zh": "券商合併後第一個交易日，大量客戶同時登入與查詢，中後台資料庫效能滿載，造成系統回應、登入與帳務功能變慢。",
+      "observed_impact": {
+        "duration_minutes": null,
+        "affected_clients": null,
+        "affected_functions": [
+          "login",
+          "account_query",
+          "system_response"
+        ]
+      },
+      "money": {
+        "company_direct_loss": null,
+        "customer_compensation": null,
+        "regulatory_fine": null,
+        "erroneous_trade_notional": null,
+        "disclosure_status": "not_disclosed_for_this_incident",
+        "warning": "不得把 2026-04-14 事故的 4,300 萬元損失歸到本筆事故。"
+      },
+      "sources": [
+        {
+          "title": "台新證券半個月出包3次 金管會：最重可罰600萬元",
+          "url": "https://www.cna.com.tw/news/afe/202604210337.aspx",
+          "source_type": "reputable_news_with_regulator_response"
+        }
+      ],
+      "annotation": {
+        "event_rating": {
+          "score": 2,
+          "severity": "high",
+          "source": "user_chat_round_1_with_ai_draft",
+          "input_basis": "existing_incident_summary_ai_draft_user_approved",
+          "rationale": "大量使用者同時存取時資料庫明確滿載，已有直接容量飽和證據。",
+          "rubric_review_status": "user_approved_first_version"
+        },
+        "risk_matches": [
+          {
+            "risk_id": "database_connection_saturation",
+            "is_at_least_medium": 1,
+            "is_high": 1,
+            "matched_input_text": "中後台資料庫效能滿載",
+            "reason": "原文明確指出資料庫滿載並造成登入、查詢及系統回應變慢。"
+          }
+        ],
+        "no_confident_match": false,
+        "reviewer": "user",
+        "status": "fully_labeled_user_approved_first_version",
+        "review_status": "user_approved_first_version"
+      }
+    },
+    {
+      "candidate_id": "real_003",
+      "incident_date": "2026-04-14",
+      "entity": "台新證券",
+      "entity_type": "broker",
+      "region": "TW",
+      "scope_match": "direct_broker_order_service",
+      "annotation_text_zh": "電子交易平台的委託與成交回報程式異常，客戶無法確認交易是否完成而重複下單，也出現無法刪單與顯示延遲。公司後續申報約 9,321 筆錯帳。",
+      "observed_impact": {
+        "duration_minutes": null,
+        "affected_clients": null,
+        "affected_functions": [
+          "order_report",
+          "execution_report",
+          "order_cancel"
+        ]
+      },
+      "money": {
+        "company_direct_loss": {
+          "amount": 43000000,
+          "currency": "TWD",
+          "qualifier": "approximately"
+        },
+        "customer_compensation": null,
+        "regulatory_fine": null,
+        "erroneous_trade_notional": {
+          "amount": 2011000000,
+          "currency": "TWD",
+          "qualifier": "approximately"
+        },
+        "disclosure_status": "company_reported_via_news",
+        "warning": "20.11 億元是申報錯帳名目金額；4,300 萬元才是公司表示自行承擔的實際錯帳損失。"
+      },
+      "sources": [
+        {
+          "title": "台新證券又傳系統異常 官網公告：已恢復正常",
+          "url": "https://www.cna.com.tw/news/afe/202605210139.aspx",
+          "source_type": "reputable_news_with_company_response"
+        },
+        {
+          "title": "4/14錯帳20.11億 台新證券損失4300萬全自行吸收",
+          "url": "https://ec.ltn.com.tw/article/breakingnews/5410142",
+          "source_type": "reputable_news_with_company_response"
+        }
+      ],
+      "annotation": {
+        "event_rating": {
+          "score": 2,
+          "severity": "high",
+          "source": "user_chat_round_1_with_ai_draft",
+          "input_basis": "existing_incident_summary_ai_draft_user_approved",
+          "rationale": "委託狀態回報異常誘發重複下單並形成大量錯帳，屬高影響且現有容量目錄不能完整描述的應用程式風險。",
+          "rubric_review_status": "user_approved_first_version"
+        },
+        "risk_matches": [
+          {
+            "risk_id": "unknown_unquantified_risk",
+            "is_at_least_medium": 1,
+            "is_high": 1,
+            "matched_input_text": "委託與成交回報程式異常",
+            "reason": "主因是委託狀態程式異常，現有容量參數無法安全量化。"
+          },
+          {
+            "risk_id": "retry_storm",
+            "is_at_least_medium": 1,
+            "is_high": 1,
+            "matched_input_text": "重複下單",
+            "reason": "客戶因無法確認交易狀態而重複送單，會放大入口請求與重複交易風險。"
+          }
+        ],
+        "no_confident_match": false,
+        "reviewer": "user",
+        "status": "fully_labeled_user_approved_first_version",
+        "review_status": "user_approved_first_version"
+      }
+    },
+    {
+      "candidate_id": "real_004",
+      "incident_date": "2024-08-05",
+      "entity": "Charles Schwab",
+      "entity_type": "broker",
+      "region": "US",
+      "scope_match": "direct_broker_order_service",
+      "annotation_text_zh": "全球市場大幅賣壓期間，券商表示較高交易量加上關鍵供應商的技術問題，造成部分客戶無法登入，客服等待時間也比預期更長。",
+      "observed_impact": {
+        "duration_minutes": null,
+        "affected_clients": null,
+        "external_outage_reports_peak": 14500,
+        "affected_functions": [
+          "login",
+          "customer_support"
+        ]
+      },
+      "money": {
+        "company_direct_loss": null,
+        "customer_compensation": null,
+        "regulatory_fine": null,
+        "erroneous_trade_notional": null,
+        "disclosure_status": "not_disclosed"
+      },
+      "sources": [
+        {
+          "title": "Schwab says high volumes and technical issue with key vendor triggered Monday's outage",
+          "url": "https://www.investing.com/news/stock-market-news/schwab-says-high-volumes-and-technical-issue-with-key-vendor-triggered-mondays-outage-3557604",
+          "source_type": "reuters_report_with_company_response"
+        }
+      ],
+      "annotation": {
+        "event_rating": {
+          "score": 2,
+          "severity": "high",
+          "source": "user_chat_round_1_with_ai_draft",
+          "input_basis": "existing_incident_summary_ai_draft_user_approved",
+          "rationale": "高交易量與關鍵供應商異常同時發生，已造成客戶無法登入。",
+          "rubric_review_status": "user_approved_first_version"
+        },
+        "risk_matches": [
+          {
+            "risk_id": "market_volatility_order_spike",
+            "is_at_least_medium": 1,
+            "is_high": 1,
+            "matched_input_text": "較高交易量",
+            "reason": "市場賣壓期間的較高交易量可能形成集中請求尖峰。"
+          },
+          {
+            "risk_id": "network_dependency_failure",
+            "is_at_least_medium": 1,
+            "is_high": 1,
+            "matched_input_text": "關鍵供應商的技術問題",
+            "reason": "關鍵外部供應商故障已中斷部分客戶存取。"
+          }
+        ],
+        "no_confident_match": false,
+        "reviewer": "user",
+        "status": "fully_labeled_user_approved_first_version",
+        "review_status": "user_approved_first_version"
+      }
+    },
+    {
+      "candidate_id": "real_005",
+      "incident_date": "2020-03-02/2020-03-03",
+      "entity": "Robinhood Financial",
+      "entity_type": "broker",
+      "region": "US",
+      "scope_match": "direct_broker_order_service",
+      "annotation_text_zh": "歷史性市場波動期間，一個關鍵系統過載並連鎖導致其他系統失敗，網站與行動 App 關閉，當時約 1,250 萬個帳戶全部無法進入、修改或取消委託。",
+      "observed_impact": {
+        "duration_minutes": null,
+        "affected_accounts": 12500000,
+        "affected_functions": [
+          "account_access",
+          "order_entry",
+          "order_modify",
+          "order_cancel",
+          "customer_support"
+        ]
+      },
+      "money": {
+        "company_direct_loss": null,
+        "customer_compensation": null,
+        "regulatory_fine": null,
+        "erroneous_trade_notional": null,
+        "related_multi_incident_customer_restitution": {
+          "amount": 5213557.98,
+          "currency": "USD",
+          "coverage_period": "2018-01 through 2020-12"
+        },
+        "disclosure_status": "incident_specific_loss_not_disclosed",
+        "warning": "521 萬美元是多次系統事故合計的客戶 restitution，不能全數歸因於 3 月 2 至 3 日這一筆。"
+      },
+      "sources": [
+        {
+          "title": "FINRA Letter of Acceptance, Waiver, and Consent No. 2020066971201",
+          "url": "https://www.finra.org/sites/default/files/2021-06/robinhood-financial-awc-063021.pdf",
+          "source_type": "regulator_enforcement_order"
+        }
+      ],
+      "annotation": {
+        "event_rating": {
+          "score": 2,
+          "severity": "high",
+          "source": "user_chat_round_1_with_ai_draft",
+          "input_basis": "existing_incident_summary_ai_draft_user_approved",
+          "rationale": "市場波動期間關鍵系統過載並連鎖造成多系統失敗，全部帳戶皆無法操作。",
+          "rubric_review_status": "user_approved_first_version"
+        },
+        "risk_matches": [
+          {
+            "risk_id": "market_volatility_order_spike",
+            "is_at_least_medium": 1,
+            "is_high": 1,
+            "matched_input_text": "歷史性市場波動期間",
+            "reason": "歷史性市場波動可能使短時間交易與查詢請求急增。"
+          },
+          {
+            "risk_id": "worker_capacity_saturation",
+            "is_at_least_medium": 1,
+            "is_high": 1,
+            "matched_input_text": "一個關鍵系統過載",
+            "reason": "原文明確指出關鍵系統過載並引發連鎖故障。"
+          }
+        ],
+        "no_confident_match": false,
+        "reviewer": "user",
+        "status": "fully_labeled_user_approved_first_version",
+        "review_status": "user_approved_first_version"
+      }
+    },
+    {
+      "candidate_id": "real_006",
+      "incident_date": "2020-03-09",
+      "entity": "Robinhood Financial",
+      "entity_type": "broker",
+      "region": "US",
+      "scope_match": "direct_broker_order_service",
+      "annotation_text_zh": "第三方執行場所變更通訊協定後，券商未在上線前測試，內部程式錯誤使委託輸入系統停擺 45 分鐘；約 16.6 萬筆客戶委託暫時卡在 pending，客戶無法新增、取消或確認是否成交。",
+      "observed_impact": {
+        "duration_minutes": 45,
+        "orders_temporarily_pending": 166000,
+        "affected_functions": [
+          "order_entry",
+          "order_route",
+          "order_cancel",
+          "order_status"
+        ]
+      },
+      "money": {
+        "company_direct_loss": null,
+        "customer_compensation": null,
+        "regulatory_fine": null,
+        "erroneous_trade_notional": null,
+        "related_multi_incident_customer_restitution": {
+          "amount": 5213557.98,
+          "currency": "USD",
+          "coverage_period": "2018-01 through 2020-12"
+        },
+        "disclosure_status": "incident_specific_loss_not_disclosed",
+        "warning": "521 萬美元是多次系統事故合計的客戶 restitution，不能全數歸因於 3 月 9 日這一筆。"
+      },
+      "sources": [
+        {
+          "title": "FINRA Letter of Acceptance, Waiver, and Consent No. 2020066971201",
+          "url": "https://www.finra.org/sites/default/files/2021-06/robinhood-financial-awc-063021.pdf",
+          "source_type": "regulator_enforcement_order"
+        }
+      ],
+      "annotation": {
+        "event_rating": {
+          "score": 2,
+          "severity": "high",
+          "source": "user_chat_round_1_with_ai_draft",
+          "input_basis": "existing_incident_summary_ai_draft_user_approved",
+          "rationale": "第三方介接變更造成系統停擺 45 分鐘，約 16.6 萬筆委託 pending，應由原低風險改為高風險。",
+          "rubric_review_status": "user_approved_first_version"
+        },
+        "risk_matches": [
+          {
+            "risk_id": "network_dependency_failure",
+            "is_at_least_medium": 1,
+            "is_high": 1,
+            "matched_input_text": "第三方執行場所變更通訊協定",
+            "reason": "第三方介接協定變更與內部相容性錯誤使委託輸入中斷。"
+          },
+          {
+            "risk_id": "unknown_unquantified_risk",
+            "is_at_least_medium": 1,
+            "is_high": 1,
+            "matched_input_text": "約 16.6 萬筆客戶委託暫時卡在 pending",
+            "reason": "大量委託長時間 pending 的影響無法由目前單一容量倍率安全量化。"
+          }
+        ],
+        "no_confident_match": false,
+        "reviewer": "user",
+        "status": "fully_labeled_user_approved_first_version",
+        "review_status": "user_approved_first_version"
+      }
+    },
+    {
+      "candidate_id": "real_007",
+      "incident_date": "2022-09-01",
+      "entity": "Zerodha Broking",
+      "entity_type": "broker",
+      "region": "IN",
+      "scope_match": "direct_broker_order_service",
+      "annotation_text_zh": "OMS 供應商管理的交易所介接元件沒有足夠磁碟空間供程序使用，部分客戶的委託輸入間歇受影響 12 分鐘，後續 reconciliation 又讓相關刪單功能受影響到 14:41。",
+      "observed_impact": {
+        "duration_minutes": 50,
+        "affected_clients_lower": 5000,
+        "affected_clients_upper": 7000,
+        "affected_functions": [
+          "order_entry",
+          "order_cancel",
+          "exchange_adapter"
+        ]
+      },
+      "money": {
+        "company_direct_loss": null,
+        "customer_compensation": null,
+        "regulatory_fine": null,
+        "erroneous_trade_notional": null,
+        "disclosure_status": "not_disclosed"
+      },
+      "sources": [
+        {
+          "title": "Issue with the order placement, order modification and order cancellation (NSE)",
+          "url": "https://zerodha.com/marketintel/disclosures/337682/intermittent-issue-with-the-orders-placement-order-modification-and-order-cancellation",
+          "source_type": "company_incident_disclosure"
+        }
+      ],
+      "annotation": {
+        "event_rating": {
+          "score": 1,
+          "severity": "medium",
+          "source": "user_chat_round_1_with_ai_draft",
+          "input_basis": "existing_incident_summary_ai_draft_user_approved",
+          "rationale": "交易所介接元件磁碟不足，部分下單與刪單間歇受影響，應由原低風險改為中風險。",
+          "rubric_review_status": "user_approved_first_version"
+        },
+        "risk_matches": [
+          {
+            "risk_id": "unknown_unquantified_risk",
+            "is_at_least_medium": 1,
+            "is_high": 0,
+            "matched_input_text": "沒有足夠磁碟空間供程序使用",
+            "reason": "磁碟資源耗盡不在現有 worker、DB 或 gateway 容量模型內，需人工處理。"
+          }
+        ],
+        "no_confident_match": false,
+        "reviewer": "user",
+        "status": "fully_labeled_user_approved_first_version",
+        "review_status": "user_approved_first_version"
+      }
+    },
+    {
+      "candidate_id": "real_008",
+      "incident_date": "2022-10-03",
+      "entity": "Zerodha Broking",
+      "entity_type": "broker",
+      "region": "IN",
+      "scope_match": "direct_broker_order_service",
+      "annotation_text_zh": "OMS 供應商的主要交易所伺服器在排程重啟時意外觸發作業系統損壞，部分客戶的下單、改單與刪單從開盤 09:00 起間歇受影響 31 分鐘。",
+      "observed_impact": {
+        "duration_minutes": 31,
+        "affected_clients_lower": 1000,
+        "affected_clients_upper": 1500,
+        "affected_functions": [
+          "order_entry",
+          "order_modify",
+          "order_cancel"
+        ]
+      },
+      "money": {
+        "company_direct_loss": null,
+        "customer_compensation": null,
+        "regulatory_fine": null,
+        "erroneous_trade_notional": null,
+        "disclosure_status": "not_disclosed"
+      },
+      "sources": [
+        {
+          "title": "Issue with the order placement, order modification and order cancellation (NSE)",
+          "url": "https://zerodha.com/marketintel/disclosures/337691/intermittent-issue-with-the-orders-placement-order-modification-and-order-cancellation-2",
+          "source_type": "company_incident_disclosure"
+        }
+      ],
+      "annotation": {
+        "event_rating": {
+          "score": 1,
+          "severity": "medium",
+          "source": "user_chat_round_1_with_ai_draft",
+          "input_basis": "existing_incident_summary_ai_draft_user_approved",
+          "rationale": "外部 OMS 供應商伺服器損壞，使部分客戶的下單、改單與刪單受影響 31 分鐘。",
+          "rubric_review_status": "user_approved_first_version"
+        },
+        "risk_matches": [
+          {
+            "risk_id": "network_dependency_failure",
+            "is_at_least_medium": 1,
+            "is_high": 0,
+            "matched_input_text": "OMS 供應商的主要交易所伺服器",
+            "reason": "外部 OMS 供應商伺服器故障造成交易功能間歇不可用。"
+          }
+        ],
+        "no_confident_match": false,
+        "reviewer": "user",
+        "status": "fully_labeled_user_approved_first_version",
+        "review_status": "user_approved_first_version"
+      }
+    },
+    {
+      "candidate_id": "real_009",
+      "incident_date": "2022-11-22",
+      "entity": "Zerodha Broking",
+      "entity_type": "broker",
+      "region": "IN",
+      "scope_match": "direct_broker_order_service",
+      "annotation_text_zh": "OMS 供應商其中一台伺服器的 RAM 發生問題，使特定 silo 的一部分客戶間歇無法看到委託狀態或修改委託，約持續 47 分鐘。",
+      "observed_impact": {
+        "duration_minutes": 47,
+        "affected_clients_lower": 9000,
+        "affected_clients_upper": 10000,
+        "affected_functions": [
+          "order_status",
+          "order_modify"
+        ]
+      },
+      "money": {
+        "company_direct_loss": null,
+        "customer_compensation": null,
+        "regulatory_fine": null,
+        "erroneous_trade_notional": null,
+        "disclosure_status": "not_disclosed"
+      },
+      "sources": [
+        {
+          "title": "Issue with the order display and order modification (NSE, BSE, MCX)",
+          "url": "https://zerodha.com/marketintel/disclosures/337696/intermittent-issue-with-the-orders-display-and-order-modification",
+          "source_type": "company_incident_disclosure"
+        }
+      ],
+      "annotation": {
+        "event_rating": {
+          "score": 1,
+          "severity": "medium",
+          "source": "user_chat_round_1_with_ai_draft",
+          "input_basis": "existing_incident_summary_ai_draft_user_approved",
+          "rationale": "硬體 RAM 故障影響特定 silo 客戶約 47 分鐘，範圍有限但持續時間明顯，應由原低風險改為中風險。",
+          "rubric_review_status": "user_approved_first_version"
+        },
+        "risk_matches": [
+          {
+            "risk_id": "unknown_unquantified_risk",
+            "is_at_least_medium": 1,
+            "is_high": 0,
+            "matched_input_text": "其中一台伺服器的 RAM 發生問題",
+            "reason": "硬體故障不屬於現有容量倍率可以可靠描述的風險。"
+          }
+        ],
+        "no_confident_match": false,
+        "reviewer": "user",
+        "status": "fully_labeled_user_approved_first_version",
+        "review_status": "user_approved_first_version"
+      }
+    },
+    {
+      "candidate_id": "real_010",
+      "incident_date": "2022-12-15",
+      "entity": "Zerodha Broking",
+      "entity_type": "broker",
+      "region": "IN",
+      "scope_match": "direct_broker_order_service",
+      "annotation_text_zh": "OMS 供應商其中一台伺服器的程序失敗，部分客戶暫時無法送出委託，約 1,500 至 2,000 名客戶受到影響；部分部位顯示問題持續到晚間。",
+      "observed_impact": {
+        "duration_minutes": 26,
+        "affected_clients_lower": 1500,
+        "affected_clients_upper": 2000,
+        "affected_functions": [
+          "order_entry",
+          "position_display"
+        ]
+      },
+      "money": {
+        "company_direct_loss": null,
+        "customer_compensation": null,
+        "regulatory_fine": null,
+        "erroneous_trade_notional": null,
+        "disclosure_status": "not_disclosed"
+      },
+      "sources": [
+        {
+          "title": "Issue with the order placement and viewing positions (NSE, BSE, MCX)",
+          "url": "https://zerodha.com/marketintel/disclosures/339498/issue-with-the-order-placement-and-viewing-positions-nse-bse-mcx",
+          "source_type": "company_incident_disclosure"
+        }
+      ],
+      "annotation": {
+        "event_rating": {
+          "score": 1,
+          "severity": "medium",
+          "source": "user_chat_round_1_with_ai_draft",
+          "input_basis": "existing_incident_summary_ai_draft_user_approved",
+          "rationale": "伺服器程序失敗影響約 1,500 至 2,000 名客戶送單，應由原低風險改為中風險。",
+          "rubric_review_status": "user_approved_first_version"
+        },
+        "risk_matches": [
+          {
+            "risk_id": "unknown_unquantified_risk",
+            "is_at_least_medium": 1,
+            "is_high": 0,
+            "matched_input_text": "其中一台伺服器的程序失敗",
+            "reason": "程序失敗造成部分客戶無法送單，但不是可由擴增 worker 直接解決的容量問題。"
+          }
+        ],
+        "no_confident_match": false,
+        "reviewer": "user",
+        "status": "fully_labeled_user_approved_first_version",
+        "review_status": "user_approved_first_version"
+      }
+    },
+    {
+      "candidate_id": "real_011",
+      "incident_date": "2020-04-20",
+      "entity": "Interactive Brokers",
+      "entity_type": "broker",
+      "region": "US",
+      "scope_match": "direct_broker_trading_system",
+      "annotation_text_zh": "原油期貨首次跌到負值前，券商沒有及時把交易系統設定成可接受負價格。平台因此無法正確顯示負價格、客戶不能輸入負價限價單，內部保證金要求也沒有在成交前正確執行，影響數百個客戶帳戶。",
+      "observed_impact": {
+        "duration_minutes": null,
+        "affected_clients": "hundreds",
+        "affected_functions": [
+          "market_data_display",
+          "order_entry",
+          "margin_control"
+        ]
+      },
+      "money": {
+        "company_recognized_aggregate_loss": {
+          "amount": 104000000,
+          "currency": "USD",
+          "qualifier": "approximately"
+        },
+        "customer_compensation_or_restitution": {
+          "amount": 82570000,
+          "currency": "USD",
+          "qualifier": "CFTC restitution credited for compensation already paid"
+        },
+        "regulatory_fine": {
+          "amount": 1750000,
+          "currency": "USD"
+        },
+        "erroneous_trade_notional": null,
+        "disclosure_status": "regulator_and_company_filing",
+        "warning": "1.04 億美元是公司認列的 aggregate loss；8,257 萬美元是 CFTC 命令中的客戶 restitution，欄位不可互換。"
+      },
+      "sources": [
+        {
+          "title": "CFTC Orders Interactive Brokers LLC to Pay a $1.75 Million Penalty for Supervision Failures",
+          "url": "https://www.cftc.gov/PressRoom/PressReleases/8432-21",
+          "source_type": "regulator_enforcement_release"
+        },
+        {
+          "title": "Interactive Brokers 2020 Q2 Form 10-Q",
+          "url": "https://investors.interactivebrokers.com/mkt/getSecFiling.php?date_added=2020-08-10+06%3A44%3A45.000000&id=101",
+          "source_type": "company_sec_filing"
+        }
+      ],
+      "annotation": {
+        "event_rating": {
+          "score": 0,
+          "severity": "low",
+          "source": "user_chat_round_1_with_ai_draft",
+          "input_basis": "existing_incident_summary_ai_draft_user_approved",
+          "rationale": "這是負價格格式與交易風控邏輯錯誤，商業影響可能很高，但沒有 Queue、worker 或資料庫容量不足證據。",
+          "rubric_review_status": "user_approved_first_version"
+        },
+        "risk_matches": [
+          {
+            "risk_id": "unknown_unquantified_risk",
+            "is_at_least_medium": 0,
+            "is_high": 0,
+            "matched_input_text": "沒有及時把交易系統設定成可接受負價格",
+            "reason": "此事件屬交易規則與價格格式支援問題，不應直接觸發容量擴增。"
+          }
+        ],
+        "no_confident_match": false,
+        "reviewer": "user",
+        "status": "fully_labeled_user_approved_first_version",
+        "review_status": "user_approved_first_version"
+      }
+    },
+    {
+      "candidate_id": "real_012",
+      "incident_date": "2012-08-01",
+      "entity": "Knight Capital Group",
+      "entity_type": "broker_dealer_market_maker",
+      "region": "US",
+      "scope_match": "direct_broker_routing_system",
+      "annotation_text_zh": "開盤前部署交易軟體時，一台伺服器沒有收到新程式碼，舊功能被意外啟動。系統在約 45 分鐘內大量送出錯誤委託，形成巨額非預期持倉。",
+      "observed_impact": {
+        "duration_minutes": 45,
+        "affected_clients": null,
+        "affected_functions": [
+          "software_deployment",
+          "order_routing",
+          "pre_trade_control"
+        ]
+      },
+      "money": {
+        "company_direct_loss": {
+          "amount": 440000000,
+          "currency": "USD",
+          "qualifier": "approximately_realized_pre_tax"
+        },
+        "customer_compensation": null,
+        "regulatory_fine": {
+          "amount": 12000000,
+          "currency": "USD"
+        },
+        "erroneous_trade_notional": null,
+        "disclosure_status": "company_filing_and_sec_order"
+      },
+      "sources": [
+        {
+          "title": "Knight Capital Group Provides Update Regarding August 1st Disruption",
+          "url": "https://www.sec.gov/Archives/edgar/data/1060749/000119312512332176/d391111dex991.htm",
+          "source_type": "company_sec_filing"
+        },
+        {
+          "title": "SEC Administrative Proceeding Release No. 70694",
+          "url": "https://www.sec.gov/litigation/admin/2013/34-70694.pdf",
+          "source_type": "regulator_enforcement_order"
+        }
+      ],
+      "annotation": {
+        "event_rating": {
+          "score": 1,
+          "severity": "medium",
+          "source": "user_chat_round_1_with_ai_draft",
+          "input_basis": "existing_incident_summary_ai_draft_user_approved",
+          "rationale": "部署不一致導致錯誤委託大量送出，屬程式部署與交易控制問題，現有容量模型無法直接量化。",
+          "rubric_review_status": "user_approved_first_version"
+        },
+        "risk_matches": [
+          {
+            "risk_id": "unknown_unquantified_risk",
+            "is_at_least_medium": 1,
+            "is_high": 0,
+            "matched_input_text": "一台伺服器沒有收到新程式碼",
+            "reason": "部署不一致啟動舊功能，並非一般流量尖峰或 worker 不足。"
+          }
+        ],
+        "no_confident_match": false,
+        "reviewer": "user",
+        "status": "fully_labeled_user_approved_first_version",
+        "review_status": "user_approved_first_version"
+      }
+    },
+    {
+      "candidate_id": "real_013",
+      "incident_date": "2022-05-02",
+      "entity": "Citigroup Global Markets Limited",
+      "entity_type": "broker_dealer_bank",
+      "region": "UK/EU",
+      "scope_match": "adjacent_algorithmic_order_control",
+      "annotation_text_zh": "交易員把原本要賣出的 5,800 萬美元股票籃子誤輸入成 4,440 億美元。部分控制擋下委託，但系統缺少有效的整籃 hard block，仍有 14 億美元賣單在多個歐洲市場成交，監控也沒有及時升級警報。",
+      "observed_impact": {
+        "duration_minutes": 20,
+        "affected_clients": null,
+        "affected_functions": [
+          "order_management",
+          "pre_trade_hard_limit",
+          "real_time_monitoring"
+        ]
+      },
+      "money": {
+        "company_direct_loss": {
+          "amount": 48000000,
+          "currency": "USD"
+        },
+        "customer_compensation": null,
+        "regulatory_fine": {
+          "amount": 27766200,
+          "currency": "GBP",
+          "regulator": "FCA"
+        },
+        "executed_erroneous_orders": {
+          "amount": 1400000000,
+          "currency": "USD"
+        },
+        "disclosure_status": "regulator_final_notice",
+        "warning": "14 億美元是已成交錯誤委託金額；4,800 萬美元才是 FCA 記載的公司損失。"
+      },
+      "sources": [
+        {
+          "title": "FCA Final Notice 2024: Citigroup Global Markets Limited",
+          "url": "https://www.fca.org.uk/publication/final-notices/citigroup-global-markets-limited-2024.pdf",
+          "source_type": "regulator_final_notice"
+        }
+      ],
+      "annotation": {
+        "event_rating": {
+          "score": 0,
+          "severity": "low",
+          "source": "user_chat_round_1_with_ai_draft",
+          "input_basis": "existing_incident_summary_ai_draft_user_approved",
+          "rationale": "事件主因是輸入錯誤與交易前 hard limit 失效，金融損失大但沒有伺服器容量不足證據。",
+          "rubric_review_status": "user_approved_first_version"
+        },
+        "risk_matches": [
+          {
+            "risk_id": "unknown_unquantified_risk",
+            "is_at_least_medium": 0,
+            "is_high": 0,
+            "matched_input_text": "缺少有效的整籃 hard block",
+            "reason": "此事件應由交易風控處理，不應因損失金額而觸發容量擴增。"
+          }
+        ],
+        "no_confident_match": false,
+        "reviewer": "user",
+        "status": "fully_labeled_user_approved_first_version",
+        "review_status": "user_approved_first_version"
+      }
+    },
+    {
+      "candidate_id": "real_014",
+      "incident_date": "2020-10-01",
+      "entity": "Tokyo Stock Exchange",
+      "entity_type": "exchange",
+      "region": "JP",
+      "scope_match": "adjacent_market_infrastructure",
+      "annotation_text_zh": "交易所共用 NAS 的記憶體模組故障後，系統沒有自動切換到備援設備，控制畫面與部分市場資訊無法使用。交易所因此停止所有上市商品一整天，並關閉委託接收。",
+      "observed_impact": {
+        "duration_minutes": null,
+        "duration_description": "full_trading_day",
+        "affected_clients": null,
+        "affected_functions": [
+          "shared_storage",
+          "failover",
+          "market_data",
+          "order_acceptance"
+        ]
+      },
+      "money": {
+        "company_direct_loss": null,
+        "customer_compensation": null,
+        "regulatory_fine": null,
+        "erroneous_trade_notional": null,
+        "disclosure_status": "not_disclosed",
+        "warning": "這是交易所事故，不是券商 App 事故；只能作相鄰市場基礎設施的 out-of-domain 測試。"
+      },
+      "sources": [
+        {
+          "title": "Report on the Cash Equity Trading System Failure on Oct. 1",
+          "url": "https://www.jpx.co.jp/english/corporate/news/news-releases/0060/b5b4pj000003r769-att/trading_system.pdf",
+          "source_type": "exchange_incident_report"
+        }
+      ],
+      "annotation": {
+        "event_rating": {
+          "score": 2,
+          "severity": "high",
+          "source": "user_chat_round_1_with_ai_draft",
+          "input_basis": "existing_incident_summary_ai_draft_user_approved",
+          "rationale": "共享 NAS 故障且備援切換失敗，使交易所停止全天委託接收，應由原低風險改為高風險。",
+          "rubric_review_status": "user_approved_first_version"
+        },
+        "risk_matches": [
+          {
+            "risk_id": "network_dependency_failure",
+            "is_at_least_medium": 1,
+            "is_high": 1,
+            "matched_input_text": "系統沒有自動切換到備援設備",
+            "reason": "主要儲存依賴故障且備援沒有接管，造成服務容量降為零。"
+          },
+          {
+            "risk_id": "unknown_unquantified_risk",
+            "is_at_least_medium": 1,
+            "is_high": 1,
+            "matched_input_text": "共用 NAS 的記憶體模組故障",
+            "reason": "NAS 硬體與 failover 問題超出目前 worker、DB、gateway 的簡化容量模型。"
+          }
+        ],
+        "no_confident_match": false,
+        "reviewer": "user",
+        "status": "fully_labeled_user_approved_first_version",
+        "review_status": "user_approved_first_version"
+      }
+    }
+  ]
+}
