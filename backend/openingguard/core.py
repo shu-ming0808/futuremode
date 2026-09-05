@@ -11,6 +11,7 @@ import math
 from collections import defaultdict, deque
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,7 @@ def list_scenarios() -> list[str]:
     return sorted(path.stem for path in SCENARIO_DIR.glob("*.json"))
 
 
+@lru_cache
 def load_risk_catalog() -> list[dict[str, Any]]:
     return load_json(DATA_DIR / "risk_catalog.json")
 
@@ -119,7 +121,6 @@ def apply_risk_assumptions(
                 effects=RiskEffects.model_validate(effects),
             )
         )
-    result = Scenario.model_validate(result.model_dump())
     return result, applied
 
 
@@ -474,7 +475,7 @@ def build_assessment(
     seed: int = 20260904,
     risk_matches: Sequence[RiskMatch] | None = None,
     apply_risks: bool = False,
-    run_profile: str = "custom",
+    requires_human_review: bool = False,
 ) -> Assessment:
     scenario = load_scenario(scenario_id)
     matches = [
@@ -484,20 +485,12 @@ def build_assessment(
     applied: list[AppliedRiskAssumption] = []
     if apply_risks and matches:
         scenario, applied = apply_risk_assumptions(scenario, matches)
-    has_uncertain_risk = any(match.severity == "uncertain" for match in matches)
     comparison = compare_strategies(scenario, runs=runs, seed=seed)
     recommended, _candidates = search_capacity_plan(scenario, runs=runs, seed=seed)
     if recommended:
         warning_code = None
         recommendation = CapacityRecommendation(
-            workers=recommended.workers,
-            congestion_probability=recommended.congestion_probability,
-            congestion_probability_ci95=recommended.congestion_probability_ci95,
-            p95_latency_ms=recommended.p95_latency_ms,
-            timeout_rate=recommended.timeout_rate,
-            database_peak_utilization=recommended.database_peak_utilization,
-            gateway_peak_utilization=recommended.gateway_peak_utilization,
-            cost=recommended.cost,
+            **recommended.model_dump(exclude={"feasible"})
         )
     else:
         warning_code = "no_feasible_plan"
@@ -508,5 +501,5 @@ def build_assessment(
         recommended=recommendation,
         warning_code=warning_code,
         risks=_build_risk_cards(matches, applied),
-        requires_human_review=has_uncertain_risk,
+        requires_human_review=requires_human_review,
     )

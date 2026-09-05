@@ -111,6 +111,20 @@ class SubmitRiskJudgmentMatch(BaseModel):
 
     model_config = {"extra": "forbid"}
 
+    @model_validator(mode="after")
+    def _reject_high_without_medium(self) -> SubmitRiskJudgmentMatch:
+        if self.is_high and not self.is_at_least_medium:
+            raise ValueError("is_high=1 時，is_at_least_medium 必須為 1")
+        return self
+
+    @property
+    def severity(self) -> Literal["low", "medium", "high"]:
+        if self.is_high:
+            return "high"
+        if self.is_at_least_medium:
+            return "medium"
+        return "low"
+
 
 class SubmitRiskJudgment(BaseModel):
     risk_matches: list[SubmitRiskJudgmentMatch] = Field(max_length=3)
@@ -118,21 +132,57 @@ class SubmitRiskJudgment(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-
-class JudgeRiskMatch(BaseModel):
-    risk_id: str
-    is_at_least_medium: int
-    is_high: int
-    matched_input_text: str
-    reason: str
-    severity: Literal["low", "medium", "high"]
-    judge_id: str
+    @model_validator(mode="after")
+    def _derive_no_confident_match(self) -> SubmitRiskJudgment:
+        # Field stays in the tool-call schema so the judge must state it, but the
+        # value is derived rather than trusted (judges have gotten it wrong before).
+        self.no_confident_match = not self.risk_matches
+        return self
 
 
 class JudgeVote(BaseModel):
+    """One judge's validated output, tagged with which judge produced it."""
+
     judge_id: str
-    risk_matches: list[JudgeRiskMatch]
+    risk_matches: list[SubmitRiskJudgmentMatch]
     no_confident_match: bool
+
+
+class AggregatedRiskMatch(BaseModel):
+    """One risk after cross-judge voting; `severity` is uncertain unless judges agree."""
+
+    risk_id: str
+    severity: Literal["low", "medium", "high", "uncertain"]
+    simulation_assumption: Literal["low", "medium", "high"]
+    selected_by_judges: int
+    judge_count: int
+    severity_votes: dict[str, int]
+    binary_vote_sums: dict[str, int]
+    matched_input_text: str
+    evidence_quotes: list[str]
+    reason: str
+
+
+class JudgeConsensus(BaseModel):
+    risk_matches: list[AggregatedRiskMatch]
+    no_confident_match: bool
+    decision_status: Literal["confirmed", "uncertain", "no_match"]
+    requires_human_review: bool
+    auto_approved: bool = False
+    judge_count: int
+    judgments: list[JudgeVote]
+    model: str = ""
+
+    @property
+    def selected_risks(self) -> list[RiskMatch]:
+        return [
+            RiskMatch(
+                risk_id=item.risk_id,
+                severity=item.severity,
+                matched_input_text=item.matched_input_text,
+            )
+            for item in self.risk_matches
+        ]
 
 
 class AppliedRiskAssumption(BaseModel):
@@ -193,15 +243,8 @@ class CandidatePlan(StrategySummary):
     feasible: bool
 
 
-class CapacityRecommendation(BaseModel):
+class CapacityRecommendation(StrategySummary):
     workers: int
-    congestion_probability: float
-    congestion_probability_ci95: list[float]
-    p95_latency_ms: float
-    timeout_rate: float
-    database_peak_utilization: float
-    gateway_peak_utilization: float
-    cost: float
 
 
 class Assessment(BaseModel):
