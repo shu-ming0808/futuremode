@@ -3,53 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import hashlib
 import math
-import os
 from statistics import NormalDist
 from time import perf_counter
 from uuid import UUID
 
+from .settings import SETTINGS as _SETTINGS
 
-def _positive_float(name: str, default: float) -> float:
-    value = float(os.getenv(name, default))
-    if value <= 0:
-        raise ValueError(f"{name} must be greater than zero")
-    return value
-
-
-def _positive_int(name: str, default: int) -> int:
-    value = int(os.getenv(name, default))
-    if value <= 0:
-        raise ValueError(f"{name} must be greater than zero")
-    return value
-
-
-@dataclass(frozen=True)
-class MockOrderSettings:
-    concurrency: int
-    validation_mean_ms: float
-    validation_sigma: float
-    database_mean_ms: float
-    database_sigma: float
-    gateway_mean_ms: float
-    gateway_sigma: float
-
-    @classmethod
-    def from_environment(cls) -> "MockOrderSettings":
-        return cls(
-            concurrency=_positive_int("MOCK_ORDER_CONCURRENCY", 20),
-            validation_mean_ms=_positive_float("MOCK_VALIDATION_MEAN_MS", 10.0),
-            validation_sigma=_positive_float("MOCK_VALIDATION_SIGMA", 0.15),
-            database_mean_ms=_positive_float("MOCK_DATABASE_MEAN_MS", 90.0),
-            database_sigma=_positive_float("MOCK_DATABASE_SIGMA", 0.35),
-            gateway_mean_ms=_positive_float("MOCK_GATEWAY_MEAN_MS", 100.0),
-            gateway_sigma=_positive_float("MOCK_GATEWAY_SIGMA", 0.45),
-        )
-
-
-SETTINGS = MockOrderSettings.from_environment()
+SETTINGS = _SETTINGS.mock_order
 CAPACITY_GATE = asyncio.Semaphore(SETTINGS.concurrency)
 
 

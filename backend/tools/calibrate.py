@@ -43,13 +43,7 @@ CALIBRATION_PROFILES = {
 
 def _order_payload(index: int, phase: str) -> dict[str, Any]:
     namespace = int.from_bytes(hashlib.sha256(phase.encode()).digest()[:8], "big")
-    return {
-        "order_id": str(UUID(int=(namespace << 64) + index)),
-        "account_id": "DEMO-ACCOUNT",
-        "symbol": "2330",
-        "side": "buy",
-        "quantity": 1,
-    }
+    return {"order_id": str(UUID(int=(namespace << 64) + index))}
 
 
 async def _one_request(

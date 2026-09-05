@@ -6,28 +6,40 @@ Monte Carlo comparison stays fast enough for a hackathon demo.
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
-from copy import deepcopy
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import json
 import math
+from collections import defaultdict, deque
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable
-import uuid
+from typing import Any
 
 import numpy as np
 
+from .schemas import (
+    AppliedRiskAssumption,
+    Assessment,
+    CandidatePlan,
+    CapacityRecommendation,
+    ResourceUtilization,
+    RiskCard,
+    RiskEffects,
+    RiskMatch,
+    Scenario,
+    SimulationRunResult,
+    SLOMetrics,
+    StrategySummary,
+    VolumeCounts,
+)
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 DATA_DIR = PACKAGE_DIR / "data"
 SCENARIO_DIR = DATA_DIR / "scenarios"
 DT = 0.1
-SIMULATOR_VERSION = "0.2.0-batch-prototype"
 STRATEGIES = ("fixed_capacity", "reactive_autoscaling", "predictive_prewarm")
 MONTE_CARLO_PROFILES = {"demo": 500, "evidence": 2_000}
 MAX_MONTE_CARLO_RUNS = MONTE_CARLO_PROFILES["evidence"]
-RISK_SEVERITIES = {"low", "medium", "high", "uncertain"}
 
 
 @dataclass
@@ -42,150 +54,108 @@ def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load_scenario(scenario_id: str) -> dict[str, Any]:
+def load_scenario(scenario_id: str) -> Scenario:
     path = SCENARIO_DIR / f"{scenario_id}.json"
     if not path.exists():
         choices = ", ".join(list_scenarios())
         raise ValueError(f"未知情境 {scenario_id!r}；可用情境：{choices}")
-    scenario = load_json(path)
-    validate_scenario(scenario)
-    return scenario
+    return Scenario.model_validate(load_json(path))
 
 
 def list_scenarios() -> list[str]:
     return sorted(path.stem for path in SCENARIO_DIR.glob("*.json"))
 
 
+@lru_cache
 def load_risk_catalog() -> list[dict[str, Any]]:
     return load_json(DATA_DIR / "risk_catalog.json")
 
 
-def validate_scenario(s: dict[str, Any]) -> None:
-    required = {
-        "scenario_id",
-        "scenario_version",
-        "duration_seconds",
-        "traffic",
-        "capacity",
-        "slo",
-        "retry",
-    }
-    missing = sorted(required - s.keys())
-    if missing:
-        raise ValueError(f"缺少必要欄位：{', '.join(missing)}")
-    if not 0 < int(s["duration_seconds"]) <= 3600:
-        raise ValueError("duration_seconds 必須介於 1～3600")
-    t, c, slo, retry = s["traffic"], s["capacity"], s["slo"], s["retry"]
-    positive = {
-        "baseline_rps": t.get("baseline_rps"),
-        "scenario_multiplier": t.get("scenario_multiplier"),
-        "current_workers": c.get("current_workers"),
-        "worker_concurrency": c.get("worker_concurrency"),
-        "mean_service_time_seconds": c.get("mean_service_time_seconds"),
-        "worker_efficiency": c.get("worker_efficiency"),
-        "db_connections": c.get("db_connections"),
-        "db_rps_per_connection": c.get("db_rps_per_connection"),
-        "gateway_rps": c.get("gateway_rps"),
-        "latency_seconds": slo.get("latency_seconds"),
-    }
-    invalid = [name for name, value in positive.items() if value is None or float(value) <= 0]
-    if invalid:
-        raise ValueError(f"欄位必須大於 0：{', '.join(invalid)}")
-    if float(c["worker_efficiency"]) > 1:
-        raise ValueError("worker_efficiency 必須介於 0～1")
-    if retry.get("policy") not in {"none", "immediate", "backoff_jitter"}:
-        raise ValueError("retry.policy 必須是 none、immediate 或 backoff_jitter")
-    if not 0 <= int(retry.get("max_retries", 0)) <= 3:
-        raise ValueError("max_retries 必須介於 0～3")
-
-
 def apply_risk_assumptions(
-    scenario: dict[str, Any], risk_matches: Iterable[dict[str, Any] | str]
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    scenario: Scenario, risk_matches: Iterable[RiskMatch | dict[str, Any] | str]
+) -> tuple[Scenario, list[AppliedRiskAssumption]]:
     """Apply only catalog effects selected by risk ID and an enumerated severity.
 
     An uncertain judge result is intentionally simulated with the catalog's high
     assumptions, but remains labelled uncertain in the returned audit record.
     """
-    result = deepcopy(scenario)
+    result = scenario.model_copy(deep=True)
     catalog = {item["risk_id"]: item for item in load_risk_catalog()}
-    applied: list[dict[str, Any]] = []
+    applied: list[AppliedRiskAssumption] = []
     seen: set[str] = set()
     for raw_match in risk_matches:
-        match = {"risk_id": raw_match, "severity": "medium"} if isinstance(raw_match, str) else raw_match
-        risk_id = str(match["risk_id"])
-        if risk_id in seen:
+        if isinstance(raw_match, str):
+            match = RiskMatch(risk_id=raw_match)
+        elif isinstance(raw_match, RiskMatch):
+            match = raw_match
+        else:
+            match = RiskMatch.model_validate(raw_match)
+        if match.risk_id in seen:
             continue
-        seen.add(risk_id)
-        item = catalog.get(risk_id)
+        seen.add(match.risk_id)
+        item = catalog.get(match.risk_id)
         if not item:
             continue
-        agent_severity = str(match.get("severity", "medium"))
-        if agent_severity not in RISK_SEVERITIES:
-            raise ValueError(f"未知風險程度：{agent_severity}")
-        simulation_severity = "high" if agent_severity == "uncertain" else agent_severity
+        simulation_severity = (
+            "high" if match.severity == "uncertain" else match.severity
+        )
         effects = item.get("simulation_assumptions", {}).get(simulation_severity, {})
         for key, value in effects.items():
             if key == "arrival_multiplier":
-                result["traffic"]["scenario_multiplier"] *= float(value)
+                result.traffic.scenario_multiplier *= float(value)
             elif key == "worker_capacity_multiplier":
-                result["capacity"]["worker_efficiency"] *= float(value)
+                result.capacity.worker_efficiency *= float(value)
             elif key == "db_capacity_multiplier":
-                result["capacity"]["db_rps_per_connection"] *= float(value)
+                result.capacity.db_rps_per_connection *= float(value)
             elif key == "gateway_capacity_multiplier":
-                result["capacity"]["gateway_rps"] *= float(value)
+                result.capacity.gateway_rps *= float(value)
             elif key == "warmup_multiplier":
-                result["capacity"]["worker_warmup_seconds"] *= float(value)
+                result.capacity.worker_warmup_seconds *= float(value)
             elif key == "max_retries":
-                result["retry"]["max_retries"] = int(value)
+                result.retry.max_retries = int(value)
         applied.append(
-            {
-                "risk_id": risk_id,
-                "agent_severity": agent_severity,
-                "simulation_assumption": simulation_severity,
-                "effects": effects,
-            }
+            AppliedRiskAssumption(
+                risk_id=match.risk_id,
+                agent_severity=match.severity,
+                simulation_assumption=simulation_severity,
+                effects=RiskEffects.model_validate(effects),
+            )
         )
-    validate_scenario(result)
     return result, applied
 
 
-def effective_worker_rps(capacity: dict[str, Any]) -> float:
+def effective_worker_rps(capacity: Any) -> float:
     """Derive per-worker throughput from concurrency, service time, and efficiency."""
     return (
-        float(capacity["worker_concurrency"])
-        / float(capacity["mean_service_time_seconds"])
-        * float(capacity["worker_efficiency"])
+        float(capacity.worker_concurrency)
+        / float(capacity.mean_service_time_seconds)
+        * float(capacity.worker_efficiency)
     )
 
 
-def generate_arrival_trace(scenario: dict[str, Any], seed: int) -> np.ndarray:
+def generate_arrival_trace(scenario: Scenario, seed: int) -> np.ndarray:
     """Generate a decaying open spike with mixed-Poisson intensity shocks."""
     rng = np.random.default_rng(seed)
-    traffic = scenario["traffic"]
-    ticks = int(scenario["duration_seconds"] / DT)
+    traffic = scenario.traffic
+    ticks = int(scenario.duration_seconds / DT)
     seconds = np.arange(ticks, dtype=float) * DT
     floor = 0.58
-    spike = floor + (float(traffic["open_spike_ratio"]) - floor) * np.exp(
-        -seconds / float(traffic["decay_seconds"])
+    spike = floor + (traffic.open_spike_ratio - floor) * np.exp(
+        -seconds / traffic.decay_seconds
     )
-    day_sigma = float(traffic.get("intensity_sigma", 0.1))
+    day_sigma = traffic.intensity_sigma
     day_shock = rng.lognormal(mean=-0.5 * day_sigma**2, sigma=day_sigma)
 
     # Short correlated shocks produce bursts without claiming a fitted process.
-    raw = rng.normal(0.0, float(traffic.get("burst_sigma", 0.15)), ticks)
+    raw = rng.normal(0.0, traffic.burst_sigma, ticks)
     smooth = np.empty(ticks)
     smooth[0] = raw[0]
     for i in range(1, ticks):
         smooth[i] = 0.88 * smooth[i - 1] + math.sqrt(1 - 0.88**2) * raw[i]
-    burst = np.exp(smooth - 0.5 * float(traffic.get("burst_sigma", 0.15)) ** 2)
+    burst = np.exp(smooth - 0.5 * traffic.burst_sigma**2)
 
     rate = (
-        float(traffic["baseline_rps"])
-        * float(traffic["scenario_multiplier"])
-        * spike
-        * day_shock
-        * burst
+        traffic.baseline_rps * traffic.scenario_multiplier * spike * day_shock * burst
     )
     return rng.poisson(np.maximum(rate * DT, 0.0)).astype(np.int64)
 
@@ -205,17 +175,17 @@ def _weighted_percentile(values: list[tuple[float, int]], q: float) -> float:
 
 
 def simulate_trace(
-    scenario: dict[str, Any], arrivals: np.ndarray, strategy: str, seed: int
-) -> dict[str, Any]:
+    scenario: Scenario, arrivals: np.ndarray, strategy: str, seed: int
+) -> SimulationRunResult:
     if strategy not in STRATEGIES:
         raise ValueError(f"未知策略：{strategy}")
-    c, slo, retry = scenario["capacity"], scenario["slo"], scenario["retry"]
+    c, slo, retry = scenario.capacity, scenario.slo, scenario.retry
     rng = np.random.default_rng(seed)
     ticks = len(arrivals)
-    slo_ticks = max(1, round(float(slo["latency_seconds"]) / DT))
-    queue_capacity = int(c["queue_capacity"])
-    current_workers = int(c["current_workers"])
-    target_workers = int(c.get("target_workers", current_workers))
+    slo_ticks = max(1, round(slo.latency_seconds / DT))
+    queue_capacity = int(c.queue_capacity)
+    current_workers = int(c.current_workers)
+    target_workers = c.effective_target_workers
     if strategy == "predictive_prewarm":
         current_workers = target_workers
     scale_ready_tick: int | None = None
@@ -237,12 +207,12 @@ def simulate_trace(
     latency_weights: list[tuple[float, int]] = []
 
     def retry_delay_ticks(attempt: int) -> int:
-        if retry["policy"] == "immediate":
+        if retry.policy == "immediate":
             return 1
-        if retry["policy"] == "backoff_jitter":
+        if retry.policy == "backoff_jitter":
             upper = min(
-                float(retry.get("max_backoff_seconds", 1.0)),
-                float(retry.get("base_delay_seconds", 0.25)) * (2 ** max(0, attempt - 1)),
+                retry.max_backoff_seconds,
+                retry.base_delay_seconds * (2 ** max(0, attempt - 1)),
             )
             return max(1, round(rng.uniform(0.0, upper) / DT))
         return 0
@@ -279,11 +249,13 @@ def simulate_trace(
             if not cohort.timed_out and tick - cohort.arrival_tick >= slo_ticks:
                 cohort.timed_out = True
                 timed_out_attempts += cohort.count
-                if cohort.attempt < int(retry["max_retries"]) and retry["policy"] != "none":
+                if cohort.attempt < retry.max_retries and retry.policy != "none":
                     delay = retry_delay_ticks(cohort.attempt + 1)
                     when = min(ticks - 1, tick + delay)
                     if when > tick:
-                        scheduled[when].append(Cohort(when, cohort.count, cohort.attempt + 1))
+                        scheduled[when].append(
+                            Cohort(when, cohort.count, cohort.attempt + 1)
+                        )
 
         q_len = sum(item.count for item in queue)
         max_queue = max(max_queue, q_len)
@@ -291,13 +263,13 @@ def simulate_trace(
             strategy == "reactive_autoscaling"
             and current_workers < target_workers
             and scale_ready_tick is None
-            and q_len >= int(c["queue_threshold"])
+            and q_len >= c.queue_threshold
         ):
-            scale_ready_tick = tick + round(float(c["worker_warmup_seconds"]) / DT)
+            scale_ready_tick = tick + round(c.worker_warmup_seconds / DT)
 
         worker_cap = int(current_workers * effective_worker_rps(c) * DT)
-        db_tick_cap = int(float(c["db_connections"]) * float(c["db_rps_per_connection"]) * DT)
-        gateway_tick_cap = int(float(c["gateway_rps"]) * DT)
+        db_tick_cap = int(c.db_connections * c.db_rps_per_connection * DT)
+        gateway_tick_cap = int(c.gateway_rps * DT)
         capacity = max(0, min(worker_cap, db_tick_cap, gateway_tick_cap))
         process_count = min(q_len, capacity)
         if db_tick_cap:
@@ -333,34 +305,40 @@ def simulate_trace(
     p95 = _weighted_percentile(latency_weights, 0.95)
     timeout_rate = timed_out_attempts / total_attempts if total_attempts else 0.0
     accepted_rate = accepted_within / original_requests if original_requests else 1.0
-    retry_amplification = total_attempts / original_requests if original_requests else 1.0
-    downstream_safe = float(slo["downstream_safe_utilization"])
+    downstream_safe = slo.downstream_safe_utilization
     congested = (
-        p95 >= float(slo["latency_seconds"])
-        or timeout_rate >= float(slo["max_timeout_rate"])
+        p95 >= slo.latency_seconds
+        or timeout_rate >= slo.max_timeout_rate
         or max_queue >= queue_capacity
         or db_peak >= downstream_safe
         or gateway_peak >= downstream_safe
     )
-    return {
-        "strategy": strategy,
-        "original_requests": original_requests,
-        "total_attempts": total_attempts,
-        "accepted_within_slo": accepted_within,
-        "accepted_after_timeout": accepted_after,
-        "unknown_or_failed": max(0, original_requests - accepted_within - accepted_after),
-        "duplicate_attempts": duplicate_attempts,
-        "duplicate_side_effect_prevented": duplicates_prevented,
-        "p95_latency_ms": round(p95 * 1000, 2),
-        "timeout_rate": timeout_rate,
-        "accepted_within_slo_rate": accepted_rate,
-        "max_queue": max_queue,
-        "database_peak_utilization": db_peak,
-        "gateway_peak_utilization": gateway_peak,
-        "retry_amplification_factor": retry_amplification,
-        "total_worker_minutes": worker_minutes,
-        "congested": congested,
-    }
+    return SimulationRunResult(
+        strategy=strategy,
+        volume=VolumeCounts(
+            original_requests=original_requests,
+            total_attempts=total_attempts,
+            accepted_within_slo=accepted_within,
+            accepted_after_timeout=accepted_after,
+            unknown_or_failed=max(
+                0, original_requests - accepted_within - accepted_after
+            ),
+            duplicate_attempts=duplicate_attempts,
+            duplicate_side_effect_prevented=duplicates_prevented,
+        ),
+        slo_metrics=SLOMetrics(
+            p95_latency_ms=round(p95 * 1000, 2),
+            timeout_rate=timeout_rate,
+            accepted_within_slo_rate=accepted_rate,
+            max_queue=max_queue,
+            congested=congested,
+        ),
+        utilization=ResourceUtilization(
+            database_peak_utilization=db_peak,
+            gateway_peak_utilization=gateway_peak,
+            total_worker_minutes=worker_minutes,
+        ),
+    )
 
 
 def _wilson(successes: int, n: int, z: float = 1.96) -> list[float]:
@@ -373,168 +351,155 @@ def _wilson(successes: int, n: int, z: float = 1.96) -> list[float]:
     return [max(0.0, centre - half), min(1.0, centre + half)]
 
 
-def summarize_runs(strategy: str, runs: list[dict[str, Any]]) -> dict[str, Any]:
-    congestion_count = sum(bool(run["congested"]) for run in runs)
+def summarize_runs(strategy: str, runs: list[SimulationRunResult]) -> StrategySummary:
+    congestion_count = sum(run.slo_metrics.congested for run in runs)
     n = len(runs)
-    numeric_mean = (
-        "timeout_rate",
-        "accepted_within_slo_rate",
-        "database_peak_utilization",
-        "gateway_peak_utilization",
-        "retry_amplification_factor",
-        "total_worker_minutes",
+    congestion_ci95 = _wilson(congestion_count, n)
+    total_worker_minutes = float(
+        np.mean([run.utilization.total_worker_minutes for run in runs])
     )
-    result: dict[str, Any] = {
-        "name": strategy,
-        "runs": n,
-        "congestion_probability": congestion_count / n,
-        "congestion_probability_ci95": _wilson(congestion_count, n),
-        "p95_latency_ms": float(np.median([run["p95_latency_ms"] for run in runs])),
-        "max_queue": int(np.percentile([run["max_queue"] for run in runs], 95)),
-    }
-    for key in numeric_mean:
-        result[key] = float(np.mean([run[key] for run in runs]))
-    result["congestion_probability_ci95_upper"] = result[
-        "congestion_probability_ci95"
-    ][1]
-    result["cost"] = result["total_worker_minutes"]
-    return result
+    return StrategySummary(
+        name=strategy,
+        congestion_probability=congestion_count / n,
+        congestion_probability_ci95=congestion_ci95,
+        p95_latency_ms=float(
+            np.median([run.slo_metrics.p95_latency_ms for run in runs])
+        ),
+        timeout_rate=float(np.mean([run.slo_metrics.timeout_rate for run in runs])),
+        database_peak_utilization=float(
+            np.mean([run.utilization.database_peak_utilization for run in runs])
+        ),
+        gateway_peak_utilization=float(
+            np.mean([run.utilization.gateway_peak_utilization for run in runs])
+        ),
+        cost=total_worker_minutes,
+    )
 
 
 def compare_strategies(
-    scenario: dict[str, Any], runs: int = 500, seed: int = 20260904
-) -> list[dict[str, Any]]:
+    scenario: Scenario, runs: int = 500, seed: int = 20260904
+) -> list[StrategySummary]:
     if not 1 <= runs <= MAX_MONTE_CARLO_RUNS:
         raise ValueError(f"runs 必須介於 1～{MAX_MONTE_CARLO_RUNS}")
-    collected = {strategy: [] for strategy in STRATEGIES}
+    collected: dict[str, list[SimulationRunResult]] = {
+        strategy: [] for strategy in STRATEGIES
+    }
     for run_index in range(runs):
         trace_seed = seed + run_index * 1009
         arrivals = generate_arrival_trace(scenario, trace_seed)
         for offset, strategy in enumerate(STRATEGIES):
             collected[strategy].append(
-                simulate_trace(scenario, arrivals, strategy, trace_seed + 100_000 + offset)
+                simulate_trace(
+                    scenario, arrivals, strategy, trace_seed + 100_000 + offset
+                )
             )
     return [summarize_runs(strategy, collected[strategy]) for strategy in STRATEGIES]
 
 
-def _passes_constraints(result: dict[str, Any], scenario: dict[str, Any]) -> bool:
-    slo = scenario["slo"]
+def _passes_constraints(result: StrategySummary, scenario: Scenario) -> bool:
+    slo = scenario.slo
     return (
-        result["p95_latency_ms"] < float(slo["latency_seconds"]) * 1000
-        and result["timeout_rate"] < float(slo["max_timeout_rate"])
-        and result["congestion_probability_ci95"][1]
-        < float(slo["max_congestion_probability"])
-        and result["database_peak_utilization"] < float(slo["downstream_safe_utilization"])
-        and result["gateway_peak_utilization"] < float(slo["downstream_safe_utilization"])
+        result.p95_latency_ms < slo.latency_seconds * 1000
+        and result.timeout_rate < slo.max_timeout_rate
+        and result.congestion_probability_ci95[1] < slo.max_congestion_probability
+        and result.database_peak_utilization < slo.downstream_safe_utilization
+        and result.gateway_peak_utilization < slo.downstream_safe_utilization
     )
 
 
 def search_capacity_plan(
-    scenario: dict[str, Any], runs: int = 500, seed: int = 20260904
-) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    candidates: list[dict[str, Any]] = []
-    for workers in scenario.get("candidate_workers", [6, 8, 10, 12, 14, 16]):
-        candidate = deepcopy(scenario)
-        candidate["capacity"]["target_workers"] = int(workers)
+    scenario: Scenario, runs: int = 500, seed: int = 20260904
+) -> tuple[CandidatePlan | None, list[CandidatePlan]]:
+    candidates: list[CandidatePlan] = []
+    for workers in scenario.candidate_workers:
+        candidate = scenario.model_copy(deep=True)
+        candidate.capacity.target_workers = int(workers)
         run_results = []
         for run_index in range(runs):
             trace_seed = seed + run_index * 1009
             arrivals = generate_arrival_trace(candidate, trace_seed)
             run_results.append(
-                simulate_trace(candidate, arrivals, "predictive_prewarm", trace_seed + 200_000)
+                simulate_trace(
+                    candidate, arrivals, "predictive_prewarm", trace_seed + 200_000
+                )
             )
         summary = summarize_runs("predictive_prewarm", run_results)
-        summary["workers"] = int(workers)
-        summary["feasible"] = _passes_constraints(summary, candidate)
-        candidates.append(summary)
-    feasible = [item for item in candidates if item["feasible"]]
+        candidates.append(
+            CandidatePlan(
+                **summary.model_dump(),
+                workers=int(workers),
+                feasible=_passes_constraints(summary, candidate),
+            )
+        )
+    feasible = [item for item in candidates if item.feasible]
     if not feasible:
         return None, candidates
     feasible.sort(
         key=lambda item: (
-            item["total_worker_minutes"],
-            item["congestion_probability"],
-            item["p95_latency_ms"],
-            item["workers"],
+            item.cost,
+            item.congestion_probability,
+            item.p95_latency_ms,
+            item.workers,
         )
     )
     return feasible[0], candidates
+
+
+def _build_risk_cards(
+    matches: list[RiskMatch], applied: list[AppliedRiskAssumption]
+) -> list[RiskCard]:
+    """Join judge output + applied simulation effects + catalog metadata into one display card."""
+    catalog = {item["risk_id"]: item for item in load_risk_catalog()}
+    effects_by_id = {item.risk_id: item.effects for item in applied}
+    cards = []
+    for match in matches:
+        item = catalog.get(match.risk_id)
+        if not item:
+            continue
+        cards.append(
+            RiskCard(
+                risk_id=match.risk_id,
+                title=item["title"],
+                severity=match.severity,
+                matched_input_text=match.matched_input_text,
+                source_url=item["source_url"],
+                effects=effects_by_id.get(match.risk_id, RiskEffects()),
+            )
+        )
+    return cards
 
 
 def build_assessment(
     scenario_id: str,
     runs: int = 500,
     seed: int = 20260904,
-    risk_matches: list[dict[str, Any]] | None = None,
+    risk_matches: Sequence[RiskMatch] | None = None,
     apply_risks: bool = False,
-    run_profile: str = "custom",
-) -> dict[str, Any]:
+    requires_human_review: bool = False,
+) -> Assessment:
     scenario = load_scenario(scenario_id)
-    matches = risk_matches or []
-    applied: list[dict[str, Any]] = []
+    matches = [
+        m if isinstance(m, RiskMatch) else RiskMatch.model_validate(m)
+        for m in (risk_matches or [])
+    ]
+    applied: list[AppliedRiskAssumption] = []
     if apply_risks and matches:
         scenario, applied = apply_risk_assumptions(scenario, matches)
-    has_uncertain_risk = any(item.get("severity") == "uncertain" for item in matches)
     comparison = compare_strategies(scenario, runs=runs, seed=seed)
-    recommended, candidates = search_capacity_plan(scenario, runs=runs, seed=seed)
-    baseline_minutes = (
-        int(scenario["capacity"]["current_workers"]) * int(scenario["duration_seconds"]) / 60.0
-    )
-    for item in comparison:
-        item["baseline_worker_minutes"] = baseline_minutes
-        item["additional_worker_minutes"] = max(0.0, item["total_worker_minutes"] - baseline_minutes)
-    for item in candidates:
-        item["baseline_worker_minutes"] = baseline_minutes
-        item["additional_worker_minutes"] = max(0.0, item["total_worker_minutes"] - baseline_minutes)
+    recommended, _candidates = search_capacity_plan(scenario, runs=runs, seed=seed)
     if recommended:
-        warning = None
-        recommendation = {
-            "workers": recommended["workers"],
-            "min_replicas": recommended["workers"],
-            "prewarm_at": "08:50",
-            "congestion_probability": recommended["congestion_probability"],
-            "congestion_probability_ci95": recommended["congestion_probability_ci95"],
-            "p95_latency_ms": recommended["p95_latency_ms"],
-            "timeout_rate": recommended["timeout_rate"],
-            "total_worker_minutes": recommended["total_worker_minutes"],
-            "cost": recommended["total_worker_minutes"],
-        }
+        warning_code = None
+        recommendation = CapacityRecommendation(
+            **recommended.model_dump(exclude={"feasible"})
+        )
     else:
-        warning = "無安全的 worker-only 方案；需調整 DB／交易閘道容量、限流、降載或人工處理。"
+        warning_code = "no_feasible_plan"
         recommendation = None
-    return {
-        "run_id": str(uuid.uuid4()),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "simulator_version": SIMULATOR_VERSION,
-        "scenario": scenario_id,
-        "scenario_version": scenario["scenario_version"],
-        "label": scenario.get("label", scenario_id),
-        "derived_parameters": {
-            "effective_worker_rps_per_worker": effective_worker_rps(scenario["capacity"]),
-            "formula": "worker_concurrency / mean_service_time_seconds * worker_efficiency",
-        },
-        "synthetic_assumption": True,
-        "random_seed": seed,
-        "runs": runs,
-        "run_profile": run_profile,
-        "risk_matches": matches,
-        "applied_risk_assumptions": applied,
-        "scenarios": comparison,
-        "recommended": recommendation,
-        "candidate_plans": candidates,
-        "warning": warning,
-        "approval_status": (
-            "requires_human_review_uncertain_agent"
-            if has_uncertain_risk
-            else "pending_human_approval"
-        ),
-        "requires_human_review": True,
-        "auto_approved": False,
-        "uncertain_risk_preview": has_uncertain_risk,
-        "formal_pass_rule": "congestion_probability_ci95.upper < max_congestion_probability",
-        "limitations": [
-            "合成 RPS，不代表任何券商真實容量",
-            "100 ms 批次 FIFO 模型，不是正式交易系統",
-            "DB 與交易閘道只是假設的容量硬上限",
-        ],
-    }
+    return Assessment(
+        label=scenario.label_or_id,
+        scenarios=comparison,
+        recommended=recommendation,
+        warning_code=warning_code,
+        risks=_build_risk_cards(matches, applied),
+        requires_human_review=requires_human_review,
+    )
