@@ -2,19 +2,37 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-import json
-import os
-from typing import Any
+from functools import lru_cache
+from typing import Any, Literal, cast
 
-from .core import DATA_DIR, build_assessment, load_risk_catalog, load_scenario
+from pydantic import create_model
 
+from .core import (
+    DATA_DIR,
+    PACKAGE_DIR,
+    build_assessment,
+    load_risk_catalog,
+    load_scenario,
+)
+from .schemas import (
+    Assessment,
+    JudgeVote,
+    LLMJudgeAgent,
+    OfflineFallbackAfterErrorAgent,
+    OfflineFallbackAgent,
+    SubmitRiskJudgment,
+    SubmitRiskJudgmentMatch,
+)
+from .settings import SETTINGS
 
 DEFAULT_MODEL = "gpt-5.1"
 PROMPT_VERSION = "openingguard-agent-v3-few-shot"
 KB_VERSION = "risk-catalog-v2"
 PROMPT_EXAMPLES_FILE = DATA_DIR / "prompt_examples.json"
+JUDGE_INSTRUCTIONS_FILE = PACKAGE_DIR / "prompts" / "judge_instructions.txt"
 JUDGE_ROLES = (
     (
         "market_evidence",
@@ -62,7 +80,9 @@ def load_prompt_examples() -> dict[str, Any]:
         if not operation_note or operation_note in seen_notes:
             raise ValueError("prompt operation_note 必須存在且不可重複")
         if bool(example.get("no_confident_match")) == bool(matches):
-            raise ValueError("prompt example 的 no_confident_match 與 risk_matches 不一致")
+            raise ValueError(
+                "prompt example 的 no_confident_match 與 risk_matches 不一致"
+            )
         seen_ids.add(example_id)
         seen_notes.add(operation_note)
         seen_risks: set[str] = set()
@@ -72,7 +92,9 @@ def load_prompt_examples() -> dict[str, Any]:
             if risk_id not in known_risks or risk_id in seen_risks:
                 raise ValueError(f"prompt example 含未知或重複 risk_id：{risk_id}")
             if not quote or quote not in operation_note:
-                raise ValueError("prompt example 的 matched_input_text 必須逐字出現在備註")
+                raise ValueError(
+                    "prompt example 的 matched_input_text 必須逐字出現在備註"
+                )
             medium = match.get("is_at_least_medium")
             high = match.get("is_high")
             if medium not in (0, 1) or high not in (0, 1):
@@ -82,67 +104,48 @@ def load_prompt_examples() -> dict[str, Any]:
     return payload
 
 
+@lru_cache
+def _judgment_model(risk_ids: tuple[str, ...]) -> type[SubmitRiskJudgment]:
+    """Subclass with risk_id narrowed to the current catalog; cached per catalog snapshot."""
+    scoped_match = create_model(
+        "ScopedSubmitRiskJudgmentMatch",
+        __base__=SubmitRiskJudgmentMatch,
+        risk_id=(Literal[risk_ids], ...),
+    )
+    return create_model(
+        "ScopedSubmitRiskJudgment",
+        __base__=SubmitRiskJudgment,
+        risk_matches=(list[scoped_match], ...),
+    )
+
+
 def _judge_tool_schema() -> dict[str, Any]:
-    risk_ids = [item["risk_id"] for item in load_risk_catalog()]
-    return {
-        "type": "function",
-        "name": "submit_risk_judgment",
-        "description": (
+    from openai import pydantic_function_tool
+
+    risk_ids = tuple(item["risk_id"] for item in load_risk_catalog())
+    function = pydantic_function_tool(
+        _judgment_model(risk_ids),
+        name="submit_risk_judgment",
+        description=(
             "Select up to three catalog risk IDs and classify capacity impact using "
             "two ordered binary decisions. Never invent numeric multipliers or capacity."
         ),
-        "strict": True,
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "risk_matches": {
-                    "type": "array",
-                    "maxItems": 3,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "risk_id": {
-                                "type": "string",
-                                "enum": risk_ids,
-                                "description": "A risk ID from the supplied fixed catalog.",
-                            },
-                            "is_at_least_medium": {
-                                "type": "integer",
-                                "enum": [0, 1],
-                                "description": "1 only when capacity impact is at least medium.",
-                            },
-                            "is_high": {
-                                "type": "integer",
-                                "enum": [0, 1],
-                                "description": "1 only for explicit evidence of high capacity impact.",
-                            },
-                            "matched_input_text": {
-                                "type": "string",
-                                "description": "A non-empty verbatim quote from the target operation note.",
-                            },
-                            "reason": {
-                                "type": "string",
-                                "description": "A short rubric-based explanation without capacity numbers.",
-                            },
-                        },
-                        "required": [
-                            "risk_id",
-                            "is_at_least_medium",
-                            "is_high",
-                            "matched_input_text",
-                            "reason",
-                        ],
-                        "additionalProperties": False,
-                    },
-                },
-                "no_confident_match": {
-                    "type": "boolean",
-                    "description": "True only when risk_matches is empty due to insufficient evidence.",
-                },
-            },
-            "required": ["risk_matches", "no_confident_match"],
-            "additionalProperties": False,
-        },
+    )["function"]
+    name = function["name"]
+    description = function.get("description", "")
+    strict = function.get("strict", True)
+    raw_parameters = function.get("parameters")
+    assert raw_parameters is not None
+    parameters: dict[str, Any] = raw_parameters
+    properties: dict[str, Any] = parameters["properties"]
+    risk_matches_schema: dict[str, Any] = properties["risk_matches"]
+    risk_matches_schema["maxItems"] = 3
+    return {
+        "type": "function",
+        "name": name,
+        "description": description,
+        "strict": strict,
+        "parameters": parameters,
     }
 
 
@@ -197,12 +200,16 @@ def _aggregate_judgments(judgments: list[dict[str, Any]]) -> dict[str, Any]:
         severity_counts = Counter(vote["severity"] for vote in votes)
         majority = [name for name, count in severity_counts.items() if count >= 2]
         risk_has_majority = len(votes) >= 2
-        severity = majority[0] if risk_has_majority and len(majority) == 1 else "uncertain"
+        severity = (
+            majority[0] if risk_has_majority and len(majority) == 1 else "uncertain"
+        )
         aggregated.append(
             {
                 "risk_id": risk_id,
                 "severity": severity,
-                "simulation_assumption": "high" if severity == "uncertain" else severity,
+                "simulation_assumption": "high"
+                if severity == "uncertain"
+                else severity,
                 "selected_by_judges": len(votes),
                 "judge_count": len(judgments),
                 "severity_votes": {
@@ -254,7 +261,9 @@ def _aggregate_judgments(judgments: list[dict[str, Any]]) -> dict[str, Any]:
 def _offline_select(operation_note: str) -> dict[str, Any]:
     """Demo continuity only. This is not presented as an LLM result."""
     lowered = operation_note.lower()
-    if any(phrase in lowered for phrase in ("沒有部署或已知", "沒有回報任何", "例行營運")):
+    if any(
+        phrase in lowered for phrase in ("沒有部署或已知", "沒有回報任何", "例行營運")
+    ):
         return {
             "risk_matches": [],
             "no_confident_match": True,
@@ -264,7 +273,9 @@ def _offline_select(operation_note: str) -> dict[str, Any]:
         }
     scored: list[tuple[int, dict[str, Any], str]] = []
     for item in load_risk_catalog():
-        hits = [signal for signal in item["trigger_signals"] if signal.lower() in lowered]
+        hits = [
+            signal for signal in item["trigger_signals"] if signal.lower() in lowered
+        ]
         if hits:
             scored.append((len(hits), item, hits[0]))
     scored.sort(key=lambda row: (-row[0], row[1]["risk_id"]))
@@ -307,45 +318,22 @@ def _enrich_matches(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _judge_models() -> list[str]:
-    configured = [
-        item.strip()
-        for item in os.getenv("OPENAI_JUDGE_MODELS", "").split(",")
-        if item.strip()
-    ]
+    configured = list(SETTINGS.agent.openai_judge_models)
     if not configured:
-        configured = [os.getenv("OPENAI_MODEL", DEFAULT_MODEL)]
+        configured = [SETTINGS.agent.openai_model or DEFAULT_MODEL]
     if len(configured) == 1:
         return configured * len(JUDGE_ROLES)
     if len(configured) != len(JUDGE_ROLES):
-        raise ValueError("OPENAI_JUDGE_MODELS 必須提供一個模型，或依三個 judge 提供三個模型")
+        raise ValueError(
+            "OPENAI_JUDGE_MODELS 必須提供一個模型，或依三個 judge 提供三個模型"
+        )
     return configured
 
 
 def _judge_instructions(judge_id: str, perspective: str) -> str:
     """Stable rubric prompt; the strict output schema remains in the tools field."""
-    return (
-        "# Role and objective\n"
-        f"你是 OpeningGuard AI 的券商下單容量風險 judge，角色為 {judge_id}。{perspective}\n"
-        "根據目標營運備註、版本化系統情境、固定風險目錄與人工標記範例，"
-        "選擇最多三個 risk_id，並判斷事件若發生時對下單系統容量的影響程度。\n\n"
-        "# Decision rules\n"
-        "- severity 代表容量影響，不代表事件發生機率。\n"
-        "- low：只有輕微異常或小幅負載增加，容量仍充足，沒有 Queue、等待或逾時。\n"
-        "- medium：可能明顯增加 Queue、服務時間或資源使用，但尚無直接證據顯示已滿載或違反 SLO。\n"
-        "- high：有明確證據顯示 Queue 持續累積、DB pool 接近耗盡、交易閘道達硬上限、"
-        "大量逾時／立即重試，或擴容會晚於尖峰，可能直接違反 SLO。\n"
-        "- low 對應 is_at_least_medium=0, is_high=0。\n"
-        "- medium 對應 is_at_least_medium=1, is_high=0。\n"
-        "- high 對應 is_at_least_medium=1, is_high=1。\n"
-        "- 不可只因看到單一關鍵字就判為 high；必須考慮完整上下文及影響描述。\n"
-        "- 人工標記範例是分級示範，不是待判斷資料；不可複製範例中的證據文字到新案例。\n"
-        "- matched_input_text 必須是 target_operation_note 的非空逐字引用。\n"
-        "- 沒有足夠原文證據時傳空 risk_matches，並將 no_confident_match 設為 true。\n"
-        "- 不可創造目錄外 risk_id，不可產生倍率、RPS、worker 數或其他容量參數。\n"
-        "- 不可聲稱委託已成交。\n\n"
-        "# Output\n"
-        "最後必須且只能呼叫 submit_risk_judgment；輸出格式由工具 schema 約束。"
-    )
+    template = JUDGE_INSTRUCTIONS_FILE.read_text(encoding="utf-8")
+    return template.format(judge_id=judge_id, perspective=perspective)
 
 
 def _llm_judge(
@@ -368,11 +356,11 @@ def _llm_judge(
         },
         "structured_scenario": {
             "scenario_id": scenario_id,
-            "scenario_version": scenario["scenario_version"],
-            "traffic": scenario["traffic"],
-            "capacity": scenario["capacity"],
-            "slo": scenario["slo"],
-            "retry": scenario["retry"],
+            "scenario_version": scenario.scenario_version,
+            "traffic": scenario.traffic.model_dump(),
+            "capacity": scenario.capacity.model_dump(),
+            "slo": scenario.slo.model_dump(),
+            "retry": scenario.retry.model_dump(),
         },
         "target_operation_note": operation_note,
     }
@@ -380,8 +368,8 @@ def _llm_judge(
         model=model,
         instructions=_judge_instructions(judge_id, perspective),
         input=json.dumps(payload, ensure_ascii=False),
-        tools=[_judge_tool_schema()],
-        tool_choice={"type": "function", "name": "submit_risk_judgment"},
+        tools=cast(Any, [_judge_tool_schema()]),
+        tool_choice=cast(Any, {"type": "function", "name": "submit_risk_judgment"}),
         parallel_tool_calls=False,
     )
     calls = [item for item in response.output if item.type == "function_call"]
@@ -391,7 +379,9 @@ def _llm_judge(
     return _validate_judgment(raw, operation_note, judge_id), response
 
 
-def _llm_select(operation_note: str, scenario_id: str) -> tuple[dict[str, Any], list[Any]]:
+def _llm_select(
+    operation_note: str, scenario_id: str
+) -> tuple[dict[str, Any], list[Any]]:
     models = _judge_models()
     with ThreadPoolExecutor(max_workers=len(JUDGE_ROLES)) as executor:
         futures = [
@@ -411,23 +401,23 @@ def _llm_select(operation_note: str, scenario_id: str) -> tuple[dict[str, Any], 
     selection = _aggregate_judgments(judgments)
     selection["models"] = models
     selection["committee_mode"] = (
-        "same_model_multi_judge" if len(set(models)) == 1 else "multi_model_openai_judges"
+        "same_model_multi_judge"
+        if len(set(models)) == 1
+        else "multi_model_openai_judges"
     )
     return selection, responses
 
 
-def _deterministic_explanation(assessment: dict[str, Any]) -> str:
-    risks = assessment.get("risk_matches", [])
+def _deterministic_explanation(assessment: Assessment) -> str:
+    risks = assessment.risk_matches
     if risks:
-        labels = "、".join(
-            f"{item['risk_id']}（{item['severity']}）" for item in risks
-        )
+        labels = "、".join(f"{item.risk_id}（{item.severity}）" for item in risks)
     else:
         labels = "沒有形成可信風險匹配"
-    if assessment["recommended"]:
-        plan = f"預熱至 {assessment['recommended']['workers']} 個 worker"
+    if assessment.recommended:
+        plan = f"預熱至 {assessment.recommended.workers} 個 worker"
     else:
-        plan = assessment["warning"]
+        plan = assessment.warning
     return (
         f"Synthetic 容量評估：{labels}。保守模擬結果建議：{plan}。"
         "本結果只代表交易閘道回傳委託已接受，不代表訂單已成交；等待工程師人工核准。"
@@ -441,8 +431,8 @@ def run_agent_assessment(
     seed: int = 20260904,
     allow_offline_fallback: bool = True,
     run_profile: str = "custom",
-) -> dict[str, Any]:
-    if not os.getenv("OPENAI_API_KEY"):
+) -> Assessment:
+    if not SETTINGS.agent.openai_api_key:
         if not allow_offline_fallback:
             raise RuntimeError("缺少 OPENAI_API_KEY，不能執行 LLM Agent")
         selection = _offline_select(operation_note)
@@ -455,14 +445,13 @@ def run_agent_assessment(
             apply_risks=True,
             run_profile=run_profile,
         )
-        assessment["agent"] = {
-            "mode": "offline_fallback",
-            "is_llm_result": False,
-            "decision_status": selection["decision_status"],
-            "reason": "OPENAI_API_KEY 未設定；此結果不能用作 Agent Demo 或評測證據。",
-            "prompt_version": PROMPT_VERSION,
-            "knowledge_base_version": KB_VERSION,
-        }
+        assessment.agent = OfflineFallbackAgent(
+            mode="offline_fallback",
+            decision_status=selection["decision_status"],
+            reason="OPENAI_API_KEY 未設定；此結果不能用作 Agent Demo 或評測證據。",
+            prompt_version=PROMPT_VERSION,
+            knowledge_base_version=KB_VERSION,
+        )
         return assessment
 
     configured_models = _judge_models()
@@ -477,22 +466,23 @@ def run_agent_assessment(
             apply_risks=True,
             run_profile=run_profile,
         )
-        assessment["agent"] = {
-            "mode": "openai_multi_judge_tool_calling",
-            "is_llm_result": True,
-            "committee_mode": selection["committee_mode"],
-            "models": selection["models"],
-            "judge_count": selection["judge_count"],
-            "decision_status": selection["decision_status"],
-            "requires_human_review": selection["requires_human_review"],
-            "auto_approved": False,
-            "prompt_version": PROMPT_VERSION,
-            "knowledge_base_version": KB_VERSION,
-            "tool_called": "submit_risk_judgment",
-            "judge_outputs": selection["judgments"],
-            "final_explanation": _deterministic_explanation(assessment),
-            "response_ids": [response.id for response in judge_responses],
-        }
+        assessment.agent = LLMJudgeAgent(
+            mode="openai_multi_judge_tool_calling",
+            committee_mode=selection["committee_mode"],
+            models=selection["models"],
+            judge_count=selection["judge_count"],
+            decision_status=selection["decision_status"],
+            requires_human_review=selection["requires_human_review"],
+            auto_approved=False,
+            prompt_version=PROMPT_VERSION,
+            knowledge_base_version=KB_VERSION,
+            tool_called="submit_risk_judgment",
+            judge_outputs=[
+                JudgeVote.model_validate(item) for item in selection["judgments"]
+            ],
+            final_explanation=_deterministic_explanation(assessment),
+            response_ids=[response.id for response in judge_responses],
+        )
         return assessment
     except Exception as exc:
         if not allow_offline_fallback:
@@ -507,24 +497,29 @@ def run_agent_assessment(
             apply_risks=True,
             run_profile=run_profile,
         )
-        assessment["agent"] = {
-            "mode": "offline_fallback_after_api_error",
-            "is_llm_result": False,
-            "models_requested": configured_models,
-            "decision_status": selection["decision_status"],
-            "reason": f"OpenAI API 呼叫失敗：{type(exc).__name__}: {exc}",
-            "prompt_version": PROMPT_VERSION,
-            "knowledge_base_version": KB_VERSION,
-        }
+        assessment.agent = OfflineFallbackAfterErrorAgent(
+            mode="offline_fallback_after_api_error",
+            models_requested=configured_models,
+            decision_status=selection["decision_status"],
+            reason=f"OpenAI API 呼叫失敗：{type(exc).__name__}: {exc}",
+            prompt_version=PROMPT_VERSION,
+            knowledge_base_version=KB_VERSION,
+        )
         return assessment
 
 
 def _macro_f1(expected: list[str], predicted: list[str]) -> float:
     scores = []
     for label in SEVERITY_ORDER:
-        tp = sum(e == label and p == label for e, p in zip(expected, predicted, strict=True))
-        fp = sum(e != label and p == label for e, p in zip(expected, predicted, strict=True))
-        fn = sum(e == label and p != label for e, p in zip(expected, predicted, strict=True))
+        tp = sum(
+            e == label and p == label for e, p in zip(expected, predicted, strict=True)
+        )
+        fp = sum(
+            e != label and p == label for e, p in zip(expected, predicted, strict=True)
+        )
+        fn = sum(
+            e == label and p != label for e, p in zip(expected, predicted, strict=True)
+        )
         denominator = 2 * tp + fp + fn
         scores.append((2 * tp / denominator) if denominator else 0.0)
     return sum(scores) / len(scores)
@@ -565,7 +560,7 @@ def _weighted_kappa(expected: list[str], predicted: list[str]) -> float | None:
 
 
 def evaluate_llm() -> dict[str, Any]:
-    if not os.getenv("OPENAI_API_KEY"):
+    if not SETTINGS.agent.openai_api_key:
         raise RuntimeError("缺少 OPENAI_API_KEY；離線備援不能冒充 LLM 評測")
     prompt_examples = load_prompt_examples()
     cases = json.loads((DATA_DIR / "eval_cases.json").read_text(encoding="utf-8"))
@@ -644,13 +639,17 @@ def evaluate_llm() -> dict[str, Any]:
         "no_match_false_positive_rate": (
             no_match_false_positives / no_match_total if no_match_total else 0.0
         ),
-        "severity_accuracy": correct / len(expected_severities) if expected_severities else 0.0,
+        "severity_accuracy": correct / len(expected_severities)
+        if expected_severities
+        else 0.0,
         "severity_macro_f1": (
             _macro_f1(expected_severities, predicted_severities)
             if expected_severities
             else 0.0
         ),
-        "severity_coverage": covered / len(expected_severities) if expected_severities else 0.0,
+        "severity_coverage": covered / len(expected_severities)
+        if expected_severities
+        else 0.0,
         "severity_confusion_matrix": confusion_matrix,
         "severity_quadratic_weighted_kappa_on_covered": _weighted_kappa(
             expected_severities, predicted_severities

@@ -2,35 +2,19 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
+
 from . import __version__
 from .agent import run_agent_assessment
 from .core import MONTE_CARLO_PROFILES, build_assessment, list_scenarios, load_scenario
-from .mock_order import SETTINGS as MOCK_ORDER_SETTINGS, process_mock_order
-from .schemas import MockOrderRequest, SimulationRequest
-
-
-DEFAULT_LOCAL_ORIGINS = ",".join(
-    (
-        "http://127.0.0.1:3000",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
-    )
-)
-
-
-def allowed_origins() -> list[str]:
-    return [
-        origin.strip()
-        for origin in os.getenv("CORS_ORIGINS", DEFAULT_LOCAL_ORIGINS).split(",")
-        if origin.strip()
-    ]
-
+from .mock_order import SETTINGS as MOCK_ORDER_SETTINGS
+from .mock_order import process_mock_order
+from .schemas import Assessment, MockOrderRequest, SimulationRequest
+from .settings import SETTINGS
 
 app = FastAPI(
     title="OpeningGuard AI Prototype",
@@ -39,7 +23,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins(),
+    allow_origins=SETTINGS.api.cors_origins,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
@@ -51,17 +35,17 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "version": __version__,
         "prototype": True,
-        "openai_api_key_present": bool(os.getenv("OPENAI_API_KEY")),
+        "openai_api_key_present": bool(SETTINGS.agent.openai_api_key),
         "scenarios": list_scenarios(),
         "mock_order_concurrency": MOCK_ORDER_SETTINGS.concurrency,
     }
 
 
 @app.post("/api/simulate")
-def simulate(body: SimulationRequest) -> dict[str, Any]:
+def simulate(body: SimulationRequest) -> Assessment:
     try:
         scenario = load_scenario(body.scenario)
-        operation_note = body.operation_note or scenario["operation_note"]
+        operation_note = body.operation_note or scenario.operation_note
         runs = body.runs or MONTE_CARLO_PROFILES[body.profile]
         run_profile = "custom" if body.runs is not None else body.profile
         if body.use_agent:
@@ -78,7 +62,7 @@ def simulate(body: SimulationRequest) -> dict[str, Any]:
             body.seed,
             run_profile=run_profile,
         )
-    except ValueError as exc:
+    except (ValueError, ValidationError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
