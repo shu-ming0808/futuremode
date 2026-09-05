@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import json
 import math
-import uuid
 from collections import defaultdict, deque
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -22,8 +21,8 @@ from .schemas import (
     Assessment,
     CandidatePlan,
     CapacityRecommendation,
-    DerivedParameters,
     ResourceUtilization,
+    RiskCard,
     RiskEffects,
     RiskMatch,
     Scenario,
@@ -354,38 +353,24 @@ def _wilson(successes: int, n: int, z: float = 1.96) -> list[float]:
 def summarize_runs(strategy: str, runs: list[SimulationRunResult]) -> StrategySummary:
     congestion_count = sum(run.slo_metrics.congested for run in runs)
     n = len(runs)
-    retry_amplification = [
-        run.volume.total_attempts / run.volume.original_requests
-        if run.volume.original_requests
-        else 1.0
-        for run in runs
-    ]
     congestion_ci95 = _wilson(congestion_count, n)
     total_worker_minutes = float(
         np.mean([run.utilization.total_worker_minutes for run in runs])
     )
     return StrategySummary(
         name=strategy,
-        runs=n,
         congestion_probability=congestion_count / n,
         congestion_probability_ci95=congestion_ci95,
-        congestion_probability_ci95_upper=congestion_ci95[1],
         p95_latency_ms=float(
             np.median([run.slo_metrics.p95_latency_ms for run in runs])
         ),
-        max_queue=int(np.percentile([run.slo_metrics.max_queue for run in runs], 95)),
         timeout_rate=float(np.mean([run.slo_metrics.timeout_rate for run in runs])),
-        accepted_within_slo_rate=float(
-            np.mean([run.slo_metrics.accepted_within_slo_rate for run in runs])
-        ),
         database_peak_utilization=float(
             np.mean([run.utilization.database_peak_utilization for run in runs])
         ),
         gateway_peak_utilization=float(
             np.mean([run.utilization.gateway_peak_utilization for run in runs])
         ),
-        retry_amplification_factor=float(np.mean(retry_amplification)),
-        total_worker_minutes=total_worker_minutes,
         cost=total_worker_minutes,
     )
 
@@ -450,7 +435,7 @@ def search_capacity_plan(
         return None, candidates
     feasible.sort(
         key=lambda item: (
-            item.total_worker_minutes,
+            item.cost,
             item.congestion_probability,
             item.p95_latency_ms,
             item.workers,
@@ -459,11 +444,35 @@ def search_capacity_plan(
     return feasible[0], candidates
 
 
+def _build_risk_cards(
+    matches: list[RiskMatch], applied: list[AppliedRiskAssumption]
+) -> list[RiskCard]:
+    """Join judge output + applied simulation effects + catalog metadata into one display card."""
+    catalog = {item["risk_id"]: item for item in load_risk_catalog()}
+    effects_by_id = {item.risk_id: item.effects for item in applied}
+    cards = []
+    for match in matches:
+        item = catalog.get(match.risk_id)
+        if not item:
+            continue
+        cards.append(
+            RiskCard(
+                risk_id=match.risk_id,
+                title=item["title"],
+                severity=match.severity,
+                matched_input_text=match.matched_input_text,
+                source_url=item["source_url"],
+                effects=effects_by_id.get(match.risk_id, RiskEffects()),
+            )
+        )
+    return cards
+
+
 def build_assessment(
     scenario_id: str,
     runs: int = 500,
     seed: int = 20260904,
-    risk_matches: Sequence[dict[str, Any] | RiskMatch] | None = None,
+    risk_matches: Sequence[RiskMatch] | None = None,
     apply_risks: bool = False,
     run_profile: str = "custom",
 ) -> Assessment:
@@ -477,54 +486,27 @@ def build_assessment(
         scenario, applied = apply_risk_assumptions(scenario, matches)
     has_uncertain_risk = any(match.severity == "uncertain" for match in matches)
     comparison = compare_strategies(scenario, runs=runs, seed=seed)
-    recommended, candidates = search_capacity_plan(scenario, runs=runs, seed=seed)
-    baseline_minutes = (
-        scenario.capacity.current_workers * scenario.duration_seconds / 60.0
-    )
-    for item in (*comparison, *candidates):
-        item.additional_worker_minutes = max(
-            0.0, item.total_worker_minutes - baseline_minutes
-        )
+    recommended, _candidates = search_capacity_plan(scenario, runs=runs, seed=seed)
     if recommended:
-        warning = None
+        warning_code = None
         recommendation = CapacityRecommendation(
             workers=recommended.workers,
-            min_replicas=recommended.workers,
-            prewarm_at="08:50",
             congestion_probability=recommended.congestion_probability,
             congestion_probability_ci95=recommended.congestion_probability_ci95,
             p95_latency_ms=recommended.p95_latency_ms,
             timeout_rate=recommended.timeout_rate,
-            total_worker_minutes=recommended.total_worker_minutes,
-            cost=recommended.total_worker_minutes,
+            database_peak_utilization=recommended.database_peak_utilization,
+            gateway_peak_utilization=recommended.gateway_peak_utilization,
+            cost=recommended.cost,
         )
     else:
-        warning = (
-            "無安全的 worker-only 方案；需調整 DB／交易閘道容量、限流、降載或人工處理。"
-        )
+        warning_code = "no_feasible_plan"
         recommendation = None
     return Assessment(
-        run_id=str(uuid.uuid4()),
-        created_at=datetime.now(timezone.utc).isoformat(),
-        scenario=scenario_id,
-        scenario_version=scenario.scenario_version,
         label=scenario.label_or_id,
-        derived_parameters=DerivedParameters(
-            effective_worker_rps_per_worker=effective_worker_rps(scenario.capacity),
-        ),
-        random_seed=seed,
-        runs=runs,
-        risk_matches=matches,
-        applied_risk_assumptions=applied,
         scenarios=comparison,
         recommended=recommendation,
-        candidate_plans=candidates,
-        baseline_worker_minutes=baseline_minutes,
-        warning=warning,
-        approval_status=(
-            "requires_human_review_uncertain_agent"
-            if has_uncertain_risk
-            else "pending_human_approval"
-        ),
-        uncertain_risk_preview=has_uncertain_risk,
+        warning_code=warning_code,
+        risks=_build_risk_cards(matches, applied),
+        requires_human_review=has_uncertain_risk,
     )

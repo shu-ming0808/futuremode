@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -19,14 +20,13 @@ from .core import (
 )
 from .schemas import (
     Assessment,
-    JudgeVote,
-    LLMJudgeAgent,
-    OfflineFallbackAfterErrorAgent,
-    OfflineFallbackAgent,
+    RiskMatch,
     SubmitRiskJudgment,
     SubmitRiskJudgmentMatch,
 )
 from .settings import SETTINGS
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gpt-5.1"
 PROMPT_VERSION = "openingguard-agent-v3-few-shot"
@@ -302,18 +302,17 @@ def _offline_select(operation_note: str) -> dict[str, Any]:
     }
 
 
-def _enrich_matches(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Join trusted metadata by risk_id; never accept model-generated URLs."""
-    catalog = {item["risk_id"]: item for item in load_risk_catalog()}
+def _to_risk_matches(matches: list[dict[str, Any]]) -> list[RiskMatch]:
+    """Drop any risk_id the model may have hallucinated outside the fixed catalog."""
+    known = {item["risk_id"] for item in load_risk_catalog()}
     return [
-        {
-            **match,
-            "title": catalog[match["risk_id"]]["title"],
-            "source_url": catalog[match["risk_id"]]["source_url"],
-            "evidence_strength": catalog[match["risk_id"]]["evidence_strength"],
-        }
+        RiskMatch(
+            risk_id=match["risk_id"],
+            severity=match["severity"],
+            matched_input_text=match["matched_input_text"],
+        )
         for match in matches
-        if match["risk_id"] in catalog
+        if match["risk_id"] in known
     ]
 
 
@@ -408,22 +407,6 @@ def _llm_select(
     return selection, responses
 
 
-def _deterministic_explanation(assessment: Assessment) -> str:
-    risks = assessment.risk_matches
-    if risks:
-        labels = "、".join(f"{item.risk_id}（{item.severity}）" for item in risks)
-    else:
-        labels = "沒有形成可信風險匹配"
-    if assessment.recommended:
-        plan = f"預熱至 {assessment.recommended.workers} 個 worker"
-    else:
-        plan = assessment.warning
-    return (
-        f"Synthetic 容量評估：{labels}。保守模擬結果建議：{plan}。"
-        "本結果只代表交易閘道回傳委託已接受，不代表訂單已成交；等待工程師人工核准。"
-    )
-
-
 def run_agent_assessment(
     scenario_id: str,
     operation_note: str,
@@ -436,8 +419,8 @@ def run_agent_assessment(
         if not allow_offline_fallback:
             raise RuntimeError("缺少 OPENAI_API_KEY，不能執行 LLM Agent")
         selection = _offline_select(operation_note)
-        matches = _enrich_matches(selection["risk_matches"])
-        assessment = build_assessment(
+        matches = _to_risk_matches(selection["risk_matches"])
+        return build_assessment(
             scenario_id,
             runs,
             seed,
@@ -445,20 +428,11 @@ def run_agent_assessment(
             apply_risks=True,
             run_profile=run_profile,
         )
-        assessment.agent = OfflineFallbackAgent(
-            mode="offline_fallback",
-            decision_status=selection["decision_status"],
-            reason="OPENAI_API_KEY 未設定；此結果不能用作 Agent Demo 或評測證據。",
-            prompt_version=PROMPT_VERSION,
-            knowledge_base_version=KB_VERSION,
-        )
-        return assessment
 
-    configured_models = _judge_models()
     try:
-        selection, judge_responses = _llm_select(operation_note, scenario_id)
-        matches = _enrich_matches(selection["risk_matches"])
-        assessment = build_assessment(
+        selection, _judge_responses = _llm_select(operation_note, scenario_id)
+        matches = _to_risk_matches(selection["risk_matches"])
+        return build_assessment(
             scenario_id,
             runs,
             seed,
@@ -466,30 +440,13 @@ def run_agent_assessment(
             apply_risks=True,
             run_profile=run_profile,
         )
-        assessment.agent = LLMJudgeAgent(
-            mode="openai_multi_judge_tool_calling",
-            committee_mode=selection["committee_mode"],
-            models=selection["models"],
-            judge_count=selection["judge_count"],
-            decision_status=selection["decision_status"],
-            requires_human_review=selection["requires_human_review"],
-            auto_approved=False,
-            prompt_version=PROMPT_VERSION,
-            knowledge_base_version=KB_VERSION,
-            tool_called="submit_risk_judgment",
-            judge_outputs=[
-                JudgeVote.model_validate(item) for item in selection["judgments"]
-            ],
-            final_explanation=_deterministic_explanation(assessment),
-            response_ids=[response.id for response in judge_responses],
-        )
-        return assessment
-    except Exception as exc:
+    except Exception:
         if not allow_offline_fallback:
             raise
+        logger.exception("LLM judge call failed; falling back to offline selection")
         selection = _offline_select(operation_note)
-        matches = _enrich_matches(selection["risk_matches"])
-        assessment = build_assessment(
+        matches = _to_risk_matches(selection["risk_matches"])
+        return build_assessment(
             scenario_id,
             runs,
             seed,
@@ -497,15 +454,6 @@ def run_agent_assessment(
             apply_risks=True,
             run_profile=run_profile,
         )
-        assessment.agent = OfflineFallbackAfterErrorAgent(
-            mode="offline_fallback_after_api_error",
-            models_requested=configured_models,
-            decision_status=selection["decision_status"],
-            reason=f"OpenAI API 呼叫失敗：{type(exc).__name__}: {exc}",
-            prompt_version=PROMPT_VERSION,
-            knowledge_base_version=KB_VERSION,
-        )
-        return assessment
 
 
 def _macro_f1(expected: list[str], predicted: list[str]) -> float:

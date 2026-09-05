@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,21 +47,18 @@ def simulate(body: SimulationRequest) -> Assessment:
     try:
         scenario = load_scenario(body.scenario)
         operation_note = body.operation_note or scenario.operation_note
-        runs = body.runs or MONTE_CARLO_PROFILES[body.profile]
-        run_profile = "custom" if body.runs is not None else body.profile
+        runs = MONTE_CARLO_PROFILES[body.profile]
         if body.use_agent:
             return run_agent_assessment(
                 body.scenario,
                 operation_note,
                 runs,
-                body.seed,
-                run_profile=run_profile,
+                run_profile=body.profile,
             )
         return build_assessment(
             body.scenario,
             runs,
-            body.seed,
-            run_profile=run_profile,
+            run_profile=body.profile,
         )
     except (ValueError, ValidationError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -69,8 +67,9 @@ def simulate(body: SimulationRequest) -> Assessment:
 @app.post("/api/mock-orders")
 async def mock_order(body: MockOrderRequest) -> dict[str, Any]:
     """Measure a local mock pipeline; never sends an order to a real market."""
-    result = await process_mock_order(body.order_id)
-    return {"order_id": str(body.order_id), **result}
+    order_id = body.order_id or uuid4()
+    result = await process_mock_order(order_id)
+    return {"order_id": str(order_id), **result}
 
 
 def main() -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
@@ -77,6 +77,27 @@ class Scenario(BaseModel):
 class RiskMatch(BaseModel):
     risk_id: str
     severity: Literal["low", "medium", "high", "uncertain"] = "medium"
+    matched_input_text: str = ""
+
+
+class RiskEffects(BaseModel):
+    arrival_multiplier: float | None = None
+    worker_capacity_multiplier: float | None = None
+    db_capacity_multiplier: float | None = None
+    gateway_capacity_multiplier: float | None = None
+    warmup_multiplier: float | None = None
+    max_retries: int | None = None
+
+
+class RiskCard(BaseModel):
+    """Judge-selected risk merged with its catalog metadata and applied simulation effects."""
+
+    risk_id: str
+    title: str
+    severity: Literal["low", "medium", "high", "uncertain"]
+    matched_input_text: str
+    source_url: str
+    effects: RiskEffects
 
 
 class SubmitRiskJudgmentMatch(BaseModel):
@@ -112,52 +133,6 @@ class JudgeVote(BaseModel):
     judge_id: str
     risk_matches: list[JudgeRiskMatch]
     no_confident_match: bool
-
-
-class OfflineFallbackAgent(BaseModel):
-    mode: Literal["offline_fallback"]
-    is_llm_result: Literal[False] = False
-    decision_status: Literal["confirmed", "uncertain", "no_match"]
-    reason: str
-    prompt_version: str
-    knowledge_base_version: str
-    models_requested: list[str] | None = None
-
-
-class OfflineFallbackAfterErrorAgent(BaseModel):
-    mode: Literal["offline_fallback_after_api_error"]
-    is_llm_result: Literal[False] = False
-    decision_status: Literal["confirmed", "uncertain", "no_match"]
-    reason: str
-    prompt_version: str
-    knowledge_base_version: str
-    models_requested: list[str] | None = None
-
-
-class LLMJudgeAgent(BaseModel):
-    mode: Literal["openai_multi_judge_tool_calling"]
-    is_llm_result: Literal[True] = True
-    committee_mode: Literal["same_model_multi_judge", "multi_model_openai_judges"]
-    models: list[str]
-    judge_count: int
-    decision_status: Literal["confirmed", "uncertain", "no_match"]
-    requires_human_review: bool
-    auto_approved: bool
-    prompt_version: str
-    knowledge_base_version: str
-    tool_called: str
-    judge_outputs: list[JudgeVote]
-    final_explanation: str
-    response_ids: list[str]
-
-
-class RiskEffects(BaseModel):
-    arrival_multiplier: float | None = None
-    worker_capacity_multiplier: float | None = None
-    db_capacity_multiplier: float | None = None
-    gateway_capacity_multiplier: float | None = None
-    warmup_multiplier: float | None = None
-    max_retries: int | None = None
 
 
 class AppliedRiskAssumption(BaseModel):
@@ -199,79 +174,51 @@ class SimulationRunResult(BaseModel):
 
 
 class StrategySummary(BaseModel):
+    """Cross-run Monte Carlo aggregates for one capacity strategy; drives the strategy comparison chart."""
+
     name: str
-    runs: int
     congestion_probability: float
     congestion_probability_ci95: list[float]
-    congestion_probability_ci95_upper: float
     p95_latency_ms: float
-    max_queue: int
     timeout_rate: float
-    accepted_within_slo_rate: float
     database_peak_utilization: float
     gateway_peak_utilization: float
-    retry_amplification_factor: float
-    total_worker_minutes: float
     cost: float
-    additional_worker_minutes: float = 0.0
 
 
 class CandidatePlan(StrategySummary):
+    """Internal only: one candidate worker count evaluated while searching for `recommended`."""
+
     workers: int
     feasible: bool
 
 
 class CapacityRecommendation(BaseModel):
     workers: int
-    min_replicas: int
-    prewarm_at: str
     congestion_probability: float
     congestion_probability_ci95: list[float]
     p95_latency_ms: float
     timeout_rate: float
-    total_worker_minutes: float
+    database_peak_utilization: float
+    gateway_peak_utilization: float
     cost: float
 
 
-class DerivedParameters(BaseModel):
-    effective_worker_rps_per_worker: float
-
-
 class Assessment(BaseModel):
-    run_id: str
-    created_at: str
-    scenario: str
-    scenario_version: str
     label: str
-    derived_parameters: DerivedParameters
-    random_seed: int
-    runs: int
-    risk_matches: list[RiskMatch]
-    applied_risk_assumptions: list[AppliedRiskAssumption]
     scenarios: list[StrategySummary]
     recommended: CapacityRecommendation | None
-    candidate_plans: list[CandidatePlan]
-    baseline_worker_minutes: float
-    warning: str | None
-    approval_status: str
-    uncertain_risk_preview: bool
-    agent: (
-        OfflineFallbackAgent | OfflineFallbackAfterErrorAgent | LLMJudgeAgent | None
-    ) = Field(default=None, discriminator="mode")
+    warning_code: Literal["no_feasible_plan"] | None
+    risks: list[RiskCard]
+    requires_human_review: bool
 
 
 class SimulationRequest(BaseModel):
     scenario: str = "normal"
     profile: Literal["demo", "evidence"] = "demo"
-    runs: int | None = Field(default=None, ge=1, le=2_000)
     operation_note: str | None = None
     use_agent: bool = False
-    seed: int = 20260904
 
 
 class MockOrderRequest(BaseModel):
-    order_id: UUID
-    account_id: str = Field(min_length=1, max_length=64)
-    symbol: str = Field(min_length=1, max_length=32)
-    side: Literal["buy", "sell"]
-    quantity: int = Field(gt=0, le=1_000_000)
+    order_id: UUID | None = None

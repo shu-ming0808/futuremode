@@ -20,38 +20,29 @@ def _compact(result: Assessment | None) -> str:
     if not result:
         return "尚未執行"
     lines = [
-        f"run_id: {result.run_id}",
-        f"scenario: {result.scenario} ({result.label})",
-        f"runs / seed: {result.runs} / {result.random_seed}",
-        f"approval: {result.approval_status}",
+        f"label: {result.label}",
+        f"requires_human_review: {result.requires_human_review}",
     ]
-    if result.agent:
-        agent = result.agent
-        lines.append(f"agent_mode: {agent['mode']} (is_llm={agent['is_llm_result']})")
-    if result.risk_matches:
+    if result.risks:
         lines.append(
             "risks: "
-            + ", ".join(
-                f"{item.risk_id}={item.severity}" for item in result.risk_matches
-            )
+            + ", ".join(f"{item.risk_id}={item.severity}" for item in result.risks)
         )
     lines.append("")
     lines.append(
-        "strategy                 congestion   CI95-high   p95(ms)   timeout    max_queue   worker-min"
+        "strategy                 congestion   CI95-high   p95(ms)   timeout   worker-min"
     )
     for item in result.scenarios:
         lines.append(
             f"{item.name:<24} {item.congestion_probability:>9.1%} "
             f"{item.congestion_probability_ci95[1]:>10.1%} "
             f"{item.p95_latency_ms:>9.0f} {item.timeout_rate:>9.2%} "
-            f"{item.max_queue:>11} {item.total_worker_minutes:>12.1f}"
+            f"{item.cost:>12.1f}"
         )
     if result.recommended:
-        lines.append(
-            f"\nrecommendation: 08:50 預熱至 {result.recommended.workers} workers"
-        )
+        lines.append(f"\nrecommendation: 開 {result.recommended.workers} workers")
     else:
-        lines.append(f"\nwarning: {result.warning}")
+        lines.append(f"\nwarning_code: {result.warning_code}")
     return "\n".join(lines)
 
 
@@ -101,7 +92,7 @@ def interactive(runs: int, run_profile: str) -> None:
             elif choice == "a":
                 status = "正在執行 Agent 與容量工具..."
                 last = _run("high_pressure", runs, True, run_profile)
-                status = "Agent 流程完成；請檢查 agent_mode 是否為真正 LLM。"
+                status = "Agent 流程完成。"
             elif choice == "e":
                 report = evaluate_llm()
                 status = json.dumps(report, ensure_ascii=False, indent=2)
